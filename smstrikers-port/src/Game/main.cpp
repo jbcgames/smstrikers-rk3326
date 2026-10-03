@@ -874,6 +874,9 @@ int main(int argc, char* argv[])
         PortBenchFrameBegin();
         PortBenchAddAcquire(acquireNs);
 
+        // Keep audio buffer full immediately after vsync/acquire
+        PortAudioUpdate();
+
         // PORT: SDL's pad state only changes in a pump and the acquire blocks under vsync, so pump again after it.
         {
             static int s_latePump = -1;

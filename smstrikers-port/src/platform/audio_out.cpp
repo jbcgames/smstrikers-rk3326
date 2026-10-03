@@ -25,12 +25,34 @@ namespace {
 constexpr int kSampleRate = 32000;
 constexpr int kChannels = 2;
 
-// How far ahead to keep the device fed: 30 ms covers a dropped frame at 60 Hz.
-constexpr int kTargetBuffers = 6;
+// Buffer depth configuration:
+// 5 ms per buffer (160 samples at 32 kHz).
+// Default 120 ms (24 buffers): prevents underruns during frame drops down to 8 FPS on 30/60 Hz displays.
+// Configurable via STRIKERS_AUDIO_BUFFER_MS (e.g. 60 to 300 ms).
+static int s_targetBuffers = -1;
+static int s_maxBuffersPerUpdate = -1;
 
-// Ceiling on catch-up, so a long stall does not run the sequencer forward at speed; past this the
-// gap is lost.
-constexpr int kMaxBuffersPerUpdate = 24;
+static int getTargetBuffers() {
+    if (s_targetBuffers < 0) {
+        const char* e = getenv("STRIKERS_AUDIO_BUFFER_MS");
+        int ms = (e != nullptr && *e != '\0') ? std::atoi(e) : 120;
+        if (ms < 20) ms = 20;
+        if (ms > 500) ms = 500;
+        s_targetBuffers = (ms + 4) / 5;
+    }
+    return s_targetBuffers;
+}
+
+static int getMaxBuffersPerUpdate() {
+    if (s_maxBuffersPerUpdate < 0) {
+        const char* e = getenv("STRIKERS_AUDIO_MAX_CATCHUP_MS");
+        int ms = (e != nullptr && *e != '\0') ? std::atoi(e) : 300;
+        if (ms < 50) ms = 50;
+        if (ms > 1000) ms = 1000;
+        s_maxBuffersPerUpdate = (ms + 4) / 5;
+    }
+    return s_maxBuffersPerUpdate;
+}
 
 SDL_AudioStream* s_stream = nullptr;
 // Bytes the device pulls at once, queued in addition to kTargetBuffers.
@@ -132,9 +154,10 @@ int PortAudioStart(void) {
         if (SDL_GetAudioDeviceFormat(dev, &got, &frames)) {
             std::fprintf(stderr,
                          "[port] audio: device \"%s\" %d Hz %d ch fmt 0x%x, %d-frame buffer; "
-                         "feeding %d Hz s16 stereo in %u-byte ticks\n",
+                         "feeding %d Hz s16 stereo in %u-byte ticks (target: %d ms, max catch-up: %d ms)\n",
                          SDL_GetAudioDeviceName(dev), got.freq, got.channels,
-                         (unsigned)got.format, frames, kSampleRate, salPortBufferBytes());
+                         (unsigned)got.format, frames, kSampleRate, salPortBufferBytes(),
+                         getTargetBuffers() * 5, getMaxBuffersPerUpdate() * 5);
         }
     }
     return 1;
@@ -195,12 +218,13 @@ void PortAudioUpdate(void) {
     if (queued == 0 && s_buffers != 0)
         ++s_underruns;
 
-    const int target = static_cast<int>(bufBytes) * kTargetBuffers + s_pullBytes;
+    const int target = static_cast<int>(bufBytes) * getTargetBuffers() + s_pullBytes;
     int want = (target - queued + static_cast<int>(bufBytes) - 1) / static_cast<int>(bufBytes);
     if (want <= 0)
         return;
-    if (want > kMaxBuffersPerUpdate)
-        want = kMaxBuffersPerUpdate;
+    const int maxWant = getMaxBuffersPerUpdate();
+    if (want > maxWant)
+        want = maxWant;
 
     for (int i = 0; i < want; ++i) {
         void* pcm = salPortNextBuffer();
