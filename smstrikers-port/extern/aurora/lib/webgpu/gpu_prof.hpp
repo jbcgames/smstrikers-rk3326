@@ -2,28 +2,26 @@
 
 #include <string_view>
 
-#include <webgpu/webgpu_cpp.h>
+// GPU profiling zones. These wrapped Dawn timestamp-query writes into a Tracy GPU
+// context; that machinery is Dawn-specific and is stubbed for the GL backend
+// (Phase 7 may reintroduce it via EXT_disjoint_timer_query). The call sites keep
+// their shape -- a scoped Zone and frame markers -- but do nothing.
 
 namespace aurora::webgpu::gpu_prof {
 
 void initialize();
 void shutdown();
 
-void frame_begin(const wgpu::CommandEncoder& encoder);
-void frame_end(const wgpu::CommandEncoder& encoder);
+void frame_begin();
+void frame_end();
 void after_submit();
-const wgpu::PassTimestampWrites* pass_writes(std::string_view name);
 
 class Zone {
 public:
-  Zone(const wgpu::CommandEncoder& encoder, std::string_view name);
-  ~Zone();
+  explicit Zone(std::string_view name) noexcept { (void)name; }
+  ~Zone() = default;
   Zone(const Zone&) = delete;
   Zone& operator=(const Zone&) = delete;
-
-private:
-  const wgpu::CommandEncoder* m_encoder = nullptr;
-  uint32_t m_endQuery = 0;
 };
 
 } // namespace aurora::webgpu::gpu_prof

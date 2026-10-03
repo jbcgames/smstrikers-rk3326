@@ -1,6 +1,6 @@
 #pragma once
 
-#include "types.hpp"
+#include "common.hpp"
 
 namespace aurora::gfx::tex_palette_conv {
 
@@ -19,6 +19,6 @@ struct ConvRequest {
 
 void initialize();
 void shutdown();
-void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req);
+void run(const ConvRequest& req);
 
 } // namespace aurora::gfx::tex_palette_conv

@@ -1,7 +1,5 @@
 #include "texture_convert.hpp"
 
-#include <atomic>
-
 #include "../internal.hpp"
 #include "../gx/gx_fmt.hpp"
 
@@ -32,7 +30,9 @@ size_t calc_offset_rgba8(uint32_t x, uint32_t y, uint32_t width) {
   return (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * sizeof(RGBA8);
 }
 
-/* Downscales RGBA8 data using a simple box filter. */
+/**
+ * Downscales RGBA8 data using a simple box filter.
+ */
 ByteBuffer downscale(const uint8_t* src, uint32_t srcWidth, uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight) {
   ByteBuffer dst{calc_size_rgba8(dstWidth, dstHeight)};
   auto* dstPixels = dst.data();
@@ -72,7 +72,11 @@ float avg_diff(const uint8_t* lhs, const uint8_t* rhs, uint32_t width, uint32_t 
   return static_cast<float>(std::sqrt(diffSum / sampleCount) / 2.56);
 }
 
-/* Attempts to detect whether the mipmaps of a texture are manually-authored, which is sometimes used for mipmap-based distance effects. */
+/**
+ * Attempts to detect whether the mipmaps of a texture are manually-authored, which is sometimes used for mipmap-based
+ * distance effects. This is achieved by downscaling the mipmaps using a box filter and comparing the average pixel
+ * difference between the original and downscaled mipmaps.
+ */
 bool arb_mip_check(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
   if (mips < 2) {
     return false;
@@ -494,96 +498,6 @@ static ByteBuffer BuildRGBA8FromCMPR(uint32_t width, uint32_t height, uint32_t m
   return buf;
 }
 
-// smstrikers-port: re-tile CMPR's big-endian blocks as little-endian BC1 and reverse each row's indices.
-static ByteBuffer BuildBC1FromCMPR(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
-  size_t total = 0;
-  for (uint32_t mip = 0, w = width, h = height; mip < mips; ++mip) {
-    total += static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * 8;
-    if (w > 1) {
-      w /= 2;
-    }
-    if (h > 1) {
-      h /= 2;
-    }
-  }
-  ByteBuffer buf{total};
-
-  uint8_t* dst = buf.data();
-  const uint8_t* src = data.data();
-  uint32_t w = width;
-  uint32_t h = height;
-  for (uint32_t mip = 0; mip < mips; ++mip) {
-    // Source tiles are always whole, so mips under 8 texels carry blocks BC1 skips.
-    const uint32_t tilesW = (w + 7) / 8;
-    const uint32_t tilesH = (h + 7) / 8;
-    const uint32_t blocksW = (w + 3) / 4;
-    const uint32_t blocksH = (h + 3) / 4;
-    CHECK(static_cast<size_t>(src - data.data()) + static_cast<size_t>(tilesW) * tilesH * 32 <= data.size(),
-          "BuildBC1FromCMPR: expected {} bytes, got {}",
-          static_cast<size_t>(src - data.data()) + static_cast<size_t>(tilesW) * tilesH * 32, data.size());
-    for (uint32_t by = 0; by < blocksH; ++by) {
-      for (uint32_t bx = 0; bx < blocksW; ++bx) {
-        const uint8_t* s =
-            src + (static_cast<size_t>(by / 2) * tilesW + (bx / 2)) * 32 + ((by % 2) * 2 + (bx % 2)) * 8;
-        dst[0] = s[1];
-        dst[1] = s[0];
-        dst[2] = s[3];
-        dst[3] = s[2];
-        for (uint32_t y = 0; y < 4; ++y) {
-          const uint8_t bits = s[4 + y];
-          dst[4 + y] = static_cast<uint8_t>(((bits & 0x03) << 6) | ((bits & 0x0C) << 2) | ((bits & 0x30) >> 2) |
-                                            ((bits & 0xC0) >> 6));
-        }
-        dst += 8;
-      }
-    }
-    src += static_cast<size_t>(tilesW) * tilesH * 32;
-    if (w > 1) {
-      w /= 2;
-    }
-    if (h > 1) {
-      h /= 2;
-    }
-  }
-
-  return buf;
-}
-
-// smstrikers-port: true only without transparent texels, which GX keeps coloured and BC1 makes black.
-bool cmpr_uses_bc1(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) noexcept {
-  if (!webgpu::g_cmprAsBc1) {
-    return false;
-  }
-  // smstrikers-port: WebGPU needs a BC texture's mip 0 in whole blocks.
-  if (width % 4 != 0 || height % 4 != 0) {
-    return false;
-  }
-  size_t blocks = 0;
-  for (uint32_t mip = 0, w = width, h = height; mip < mips; ++mip) {
-    blocks += static_cast<size_t>((w + 7) / 8) * ((h + 7) / 8) * 4;
-    w = w > 1 ? w / 2 : 1;
-    h = h > 1 ? h / 2 : 1;
-  }
-  if (blocks * 8 > data.size()) {
-    return false;
-  }
-  const uint8_t* s = data.data();
-  for (size_t b = 0; b < blocks; ++b, s += 8) {
-    const uint16_t color0 = static_cast<uint16_t>((s[0] << 8) | s[1]);
-    const uint16_t color1 = static_cast<uint16_t>((s[2] << 8) | s[3]);
-    if (color0 > color1) {
-      continue;
-    }
-    for (uint32_t y = 0; y < 4; ++y) {
-      const uint8_t bits = s[4 + y];
-      if ((bits & 0x03) == 0x03 || (bits & 0x0C) == 0x0C || (bits & 0x30) == 0x30 || (bits & 0xC0) == 0xC0) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 static ByteBuffer BuildRGBA8FromBC1(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
   const size_t texelCount = ComputeMippedTexelCount(width, height, mips);
   ByteBuffer buf{sizeof(RGBA8) * texelCount};
@@ -658,39 +572,9 @@ static ByteBuffer BuildRGBA8FromBC1(uint32_t width, uint32_t height, uint32_t mi
   return buf;
 }
 
-// PORT-PROBE: what the console's textures cost after conversion.
-namespace {
-struct TexTally {
-  std::atomic<uint64_t> count{0};
-  std::atomic<uint64_t> srcBytes{0};
-  std::atomic<uint64_t> dstBytes{0};
-};
-TexTally g_texTally[64];
-
-// smstrikers-port: read the texture tally from outside Aurora. src/platform/overlay.cpp draws it; see aurora_gfx_pool_stats for the reason these accessors exist at all.
-void tex_tally_totals(uint64_t* src, uint64_t* dst, uint64_t* count) {
-  uint64_t s = 0, d = 0, n = 0;
-  for (u32 f = 0; f < 64; ++f) {
-    n += g_texTally[f].count.load(std::memory_order_relaxed);
-    s += g_texTally[f].srcBytes.load(std::memory_order_relaxed);
-    d += g_texTally[f].dstBytes.load(std::memory_order_relaxed);
-  }
-  if (src != nullptr) *src = s;
-  if (dst != nullptr) *dst = d;
-  if (count != nullptr) *count = n;
-}
-} // namespace
-
-extern "C" void aurora_gfx_texture_stats(uint64_t* srcBytes, uint64_t* uploadedBytes,
-                                         uint64_t* count) {
-  tex_tally_totals(srcBytes, uploadedBytes, count);
-}
-
 ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
   ZoneScoped;
   ByteBuffer converted;
-  bool cmprArbMips = false;
-  bool cmprBc1 = false;
   switch (format) {
     DEFAULT_FATAL("convert_texture: unknown texture format {}", format);
   case GX_TF_R8_PC:
@@ -699,19 +583,19 @@ ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, ui
           DecodeLinear<TextureDecoderI8>(static_cast<uint32_t>(ComputeMippedTexelCount(width, height, mips)), data);
       break;
     }
-    return {.format = to_wgpu(format), .width = width, .height = height, .mips = mips};
+    return {.format = to_gl(format), .width = width, .height = height, .mips = mips};
   case GX_TF_RG8_PC:
     if (!uses_direct_texture_upload(format)) {
       converted =
           DecodeLinear<TextureDecoderRG8>(static_cast<uint32_t>(ComputeMippedTexelCount(width, height, mips)), data);
       break;
     }
-    return {.format = to_wgpu(format), .width = width, .height = height, .mips = mips};
+    return {.format = to_gl(format), .width = width, .height = height, .mips = mips};
   case GX_TF_RGBA8_PC:
-    return {.format = to_wgpu(format), .width = width, .height = height, .mips = mips};
+    return {.format = to_gl(format), .width = width, .height = height, .mips = mips};
   case GX_TF_BC1_PC:
     if (uses_direct_texture_upload(format)) {
-      return {.format = to_wgpu(format), .width = width, .height = height, .mips = mips};
+      return {.format = to_gl(format), .width = width, .height = height, .mips = mips};
     }
     converted = BuildRGBA8FromBC1(width, height, mips, data);
     break;
@@ -746,31 +630,16 @@ ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, ui
     converted = BuildRGBA8FromGCN(width, height, mips, data);
     break;
   case GX_TF_CMPR:
-    if (cmpr_uses_bc1(width, height, mips, data)) {
-      // smstrikers-port: arb_mip_check reads RGBA8, so decode once for it.
-      if (mips > 1) {
-        cmprArbMips = arb_mip_check(width, height, mips, BuildRGBA8FromCMPR(width, height, mips, data));
-      }
-      converted = BuildBC1FromCMPR(width, height, mips, data);
-      cmprBc1 = true;
-      break;
-    }
     converted = BuildRGBA8FromCMPR(width, height, mips, data);
     break;
   }
-  const auto wgpuFormat = to_wgpu(format);
-  bool hasArbitraryMips = cmprArbMips;
-  if (!cmprBc1 && !is_pc_texture_format(format) && wgpuFormat == wgpu::TextureFormat::RGBA8Unorm && mips > 1) {
+  const auto glFormat = to_gl(format);
+  bool hasArbitraryMips = false;
+  if (!is_pc_texture_format(format) && glFormat == gl::TextureFormat::RGBA8Unorm && mips > 1) {
     hasArbitraryMips = arb_mip_check(width, height, mips, converted);
   }
-  // Tallied unconditionally, for the same reason as the pool peaks: the debug overlay reads this every frame.
-  if (format < 64) {
-    g_texTally[format].count.fetch_add(1);
-    g_texTally[format].srcBytes.fetch_add(data.size());
-    g_texTally[format].dstBytes.fetch_add(converted.size());
-  }
   return {
-      .format = cmprBc1 ? wgpu::TextureFormat::BC1RGBAUnorm : wgpuFormat,
+      .format = glFormat,
       .width = width,
       .height = height,
       .mips = mips,
@@ -794,7 +663,7 @@ ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data
     break;
   }
   return {
-      .format = wgpu::TextureFormat::RGBA8Unorm,
+      .format = gl::TextureFormat::RGBA8Unorm,
       .width = width,
       .height = 1,
       .mips = 1,
@@ -852,61 +721,12 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
 
   bool hasArbitraryMips = arb_mip_check(width, height, mips, pixels);
   return {
-      .format = wgpu::TextureFormat::RGBA8Unorm,
+      .format = gl::TextureFormat::RGBA8Unorm,
       .width = width,
       .height = height,
       .mips = mips,
       .data = std::move(pixels),
       .hasArbitraryMips = hasArbitraryMips,
   };
-}
-
-ByteBuffer decode_rgba8(u32 format, uint32_t width, uint32_t height, ArrayRef<uint8_t> data, GXTlutFmt tlutFormat,
-                        uint16_t tlutEntries, ArrayRef<uint8_t> tlutData) {
-  ByteBuffer indices;
-  switch (format) {
-  default:
-    return {};
-  case GX_TF_I4:
-    return DecodeTiled<TextureDecoderI4>(width, height, 1, data);
-  case GX_TF_I8:
-    return DecodeTiled<TextureDecoderI8>(width, height, 1, data);
-  case GX_TF_IA4:
-    return DecodeTiled<TextureDecoderIA4>(width, height, 1, data);
-  case GX_TF_IA8:
-    return DecodeTiled<TextureDecoderIA8>(width, height, 1, data);
-  case GX_TF_RGB565:
-    return DecodeTiled<TextureDecoderRGB565>(width, height, 1, data);
-  case GX_TF_RGB5A3:
-    return DecodeTiled<TextureDecoderRGB5A3>(width, height, 1, data);
-  case GX_TF_RGBA8:
-    return BuildRGBA8FromGCN(width, height, 1, data);
-  case GX_TF_CMPR:
-    return BuildRGBA8FromCMPR(width, height, 1, data);
-  case GX_TF_C4:
-    indices = DecodeTiled<TextureDecoderC4>(width, height, 1, data);
-    break;
-  case GX_TF_C8:
-    indices = DecodeTiled<TextureDecoderC8>(width, height, 1, data);
-    break;
-  case GX_TF_C14X2:
-    indices = DecodeTiled<TextureDecoderC14X2>(width, height, 1, data);
-    break;
-  }
-
-  const auto palette = convert_tlut(tlut_texture_format(tlutFormat), tlutEntries, tlutData);
-  if (indices.empty() || palette.data.empty()) {
-    return {};
-  }
-  const size_t pixelCount = static_cast<size_t>(width) * height;
-  const auto* indexData = reinterpret_cast<const u16*>(indices.data());
-  ByteBuffer pixels;
-  pixels.reserve_extra(pixelCount * 4);
-  for (size_t i = 0; i < pixelCount; ++i) {
-    const u32 index = indexData[i];
-    constexpr uint8_t transparent[4] = {0, 0, 0, 0};
-    pixels.append(index < tlutEntries ? palette.data.data() + static_cast<size_t>(index) * 4 : transparent, 4);
-  }
-  return pixels;
 }
 } // namespace aurora::gfx

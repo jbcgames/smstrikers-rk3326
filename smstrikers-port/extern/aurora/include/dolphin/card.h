@@ -250,6 +250,16 @@ void CARDSetGameAndMaker(const s32 chan, const char* game, const char* maker);
 void CARDDetectDolphin(s32 chan);
 // pass -1 to set both
 void CARDSetBasePath(const char*, s32 chan);
+
+/**
+ * Points a slot at an exact card image file rather than a directory to derive one from.
+ *
+ * The path is used verbatim, parent directories are created, and CARDInit() formats a new image
+ * there when the file does not exist. Only meaningful with CARD_RAWIMAGE, since a single file is a
+ * whole card; call CARDSetLoadType(CARD_RAWIMAGE) first. Any chan other than 1 targets slot A.
+ * Must be called before CARDInit().
+ */
+void CARDSetCardImagePath(const char*, s32 chan);
 void CARDSetLoadType(CARDFileType type);
 
 #else

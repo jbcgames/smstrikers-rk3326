@@ -1,7 +1,5 @@
 #include "render_worker.hpp"
 
-#include "../thread.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -11,10 +9,12 @@
 namespace aurora::gfx::render_worker {
 namespace {
 constexpr size_t QueueCapacity = 256;
-constexpr auto IdlePumpInterval = std::chrono::milliseconds{1};
+// Nothing runs on a timeout, and enqueue/close notify the CV.
+// A 1ms timeout woke the worker 1000 times a second while idle, stealing CPU time on Cortex-A35.
+constexpr auto IdlePumpInterval = std::chrono::milliseconds{250};
 
 BoundedQueue g_queue{QueueCapacity};
-thread::Thread g_thread;
+std::thread g_thread;
 std::atomic_bool g_running = false;
 std::atomic_size_t g_pendingItems = 0;
 std::thread::id g_workerThreadId;
@@ -31,14 +31,17 @@ void complete_sync(const std::shared_ptr<SyncState>& sync) {
   sync->cv.notify_all();
 }
 
-void worker_main(std::stop_token token) {
+void worker_main() {
+#ifdef TRACY_ENABLE
+  tracy::SetThreadName("Aurora render worker");
+#endif
   g_workerThreadId = std::this_thread::get_id();
 
   while (true) {
     bool closed = false;
     auto item = g_queue.pop_for(IdlePumpInterval, closed);
     if (!item) {
-      if (closed || token.stop_requested()) {
+      if (closed) {
         break;
       }
       continue;
@@ -156,28 +159,6 @@ size_t FrameSlotPool::acquire() {
   return 0;
 }
 
-std::optional<size_t> FrameSlotPool::acquire_for(std::chrono::nanoseconds timeout) {
-  std::unique_lock lock{m_mutex};
-  const bool ready = m_cv.wait_for(lock, timeout, [&] {
-    for (const bool free : m_freeSlots) {
-      if (free) {
-        return true;
-      }
-    }
-    return false;
-  });
-  if (!ready) {
-    return std::nullopt;
-  }
-  for (size_t i = 0; i < m_freeSlots.size(); ++i) {
-    if (m_freeSlots[i]) {
-      m_freeSlots[i] = false;
-      return i;
-    }
-  }
-  return std::nullopt;
-}
-
 std::optional<size_t> FrameSlotPool::try_acquire() {
   std::lock_guard lock{m_mutex};
   for (size_t i = 0; i < m_freeSlots.size(); ++i) {
@@ -218,11 +199,7 @@ void initialize() {
   }
   g_queue.reset();
   g_pendingItems.store(0, std::memory_order_release);
-  g_thread = thread::Thread{{
-                                .name = "Aurora render worker",
-                                .affinity = thread::Affinity::SharedCache,
-                            },
-                            worker_main};
+  g_thread = std::thread(worker_main);
 }
 
 void shutdown() {
@@ -289,6 +266,8 @@ void synchronize() {
 }
 
 bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
+
+bool is_running() noexcept { return g_running.load(std::memory_order_acquire); }
 
 bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
 

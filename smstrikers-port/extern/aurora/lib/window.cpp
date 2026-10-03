@@ -28,6 +28,7 @@ extern "C" void Android_UnlockActivityMutex(void);
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <vector>
 
@@ -213,6 +214,30 @@ void process_event(SDL_Event& event) {
     });
     break;
   }
+  case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
+    auto* ctrl = SDL_GetGamepadFromID(event.gbutton.which);
+    if (ctrl != nullptr) {
+      const bool backPressed = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_BACK);
+      const bool startPressed = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_START);
+      const bool guidePressed = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_GUIDE);
+      if (guidePressed || (backPressed && startPressed)) {
+        Log.info("Exit combo (Select + Start) triggered from gamepad");
+        g_events.push_back(AuroraEvent{
+            .type = AURORA_EXIT,
+        });
+      }
+    }
+    break;
+  }
+  case SDL_EVENT_KEY_DOWN: {
+    if (event.key.scancode == SDL_SCANCODE_ESCAPE) {
+      Log.info("Exit hotkey (Escape) triggered from keyboard");
+      g_events.push_back(AuroraEvent{
+          .type = AURORA_EXIT,
+      });
+    }
+    break;
+  }
   case SDL_EVENT_MOUSE_WHEEL:
     if (primaryWindow) {
       input::set_mouse_scroll(event.wheel.x, event.wheel.y);
@@ -291,7 +316,36 @@ const AuroraEvent* poll_events() {
 }
 
 bool create_window(AuroraBackend backend) {
-  SDL_WindowFlags flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
+  // The SDL2 shim is our custom SDL3 video driver wrapping the device's firmware SDL2 (kmsdrm/gbm via
+  // libMali). On that driver we let SDL create/own the GL context so it exposes the firmware's borrowed
+  // EGL display/surface/context, which Dawn then binds to via the adapter proc loader. On desktop
+  // (wayland/x11) Dawn owns EGL itself, so an SDL-owned context would make Dawn's worker-thread
+  // eglMakeCurrent fail with EGL_BAD_ACCESS — keep upstream's no-GL-flag behaviour there.
+  const char* videoDriver = SDL_GetCurrentVideoDriver();
+  const bool sdl2ShimDriver = videoDriver != nullptr && SDL_strcmp(videoDriver, "sdl2") == 0;
+
+  // The shim exists to lend Dawn the firmware's EGL/GLES display; no other backend can present
+  // through it. On a fresh config (backend "auto") the backend loop would otherwise attempt
+  // Vulkan first, and that attempt's window create/destroy cycle leaves the firmware SDL2/EGL
+  // stack unable to keep a context current for the later GLES attempt's EFB present init
+  // (fresh-install crash in the field). Refuse non-GLES backends before touching the display so
+  // the loop falls straight through to OpenGLES. BACKEND_NULL stays allowed: it is the loop's
+  // final fallback and must reach webgpu::initialize to produce the loud EFB-or-bust fatal.
+  if (sdl2ShimDriver && backend != BACKEND_OPENGLES && backend != BACKEND_NULL) {
+    constexpr std::array kBackendNames{"Auto",     "D3D11",  "D3D12",  "Metal", "Vulkan",
+                                       "OpenGL", "OpenGLES", "WebGPU", "Null"};
+    const auto idx = static_cast<size_t>(backend);
+    Log.info("Skipping backend {} on the sdl2 shim driver (GLES-only display path)",
+             idx < kBackendNames.size() ? kBackendNames[idx] : "?");
+    return false;
+  }
+
+  SDL_WindowFlags flags = 0;
+  // The borrowed-EGL path presents at the shim's own drawable size; high-DPI scaling here would desync
+  // the WebGPU swapchain extent from the borrowed surface. Skip it on the shim driver only.
+  if (!sdl2ShimDriver) {
+    flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+  }
 #if TARGET_OS_IOS || TARGET_OS_TV
   flags |= SDL_WINDOW_FULLSCREEN;
 #else
@@ -299,9 +353,12 @@ bool create_window(AuroraBackend backend) {
   if (g_config.startFullscreen) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }
-  // smstrikers-port: SDL applies this at show, so fullscreen still wins.
-  if (g_config.startMaximized) {
-    flags |= SDL_WINDOW_MAXIMIZED;
+#endif
+#ifdef AURORA_ENABLE_GX
+  // The GL backend renders through a real SDL GL context (desktop: SDL_GL_CreateContext;
+  // device: the shim's borrowed EGL context), so the window must be an OpenGL window.
+  if (backend == BACKEND_OPENGL || backend == BACKEND_OPENGLES) {
+    flags |= SDL_WINDOW_OPENGL;
   }
 #endif
   auto width = static_cast<Sint32>(g_config.windowWidth);
@@ -315,6 +372,26 @@ bool create_window(AuroraBackend backend) {
   }
   if (height < 480) {
     height = 480;
+  }
+
+  // Device (sdl2 shim) path: the firmware SDL2 creates its fbdev surface at exactly the size we
+  // request and there is no compositor to place or scale it, so a window that is not the panel size
+  // shows up clipped and offset -- and SDL_WINDOW_FULLSCREEN is a no-op through the shim, so it
+  // cannot fix that. Size the window to the panel's native mode (the shim republishes the firmware
+  // SDL2 desktop mode as this SDL3 display), which makes every handheld fill its own panel with no
+  // per-device window-size config. Desktop keeps the configured/default size. The min-size clamp
+  // above stays as the floor for the pathological "mode query failed" case.
+  if (sdl2ShimDriver) {
+    const SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode* mode = display != 0 ? SDL_GetDesktopDisplayMode(display) : nullptr;
+    if (mode != nullptr && mode->w > 0 && mode->h > 0) {
+      width = mode->w;
+      height = mode->h;
+      Log.info("Device panel mode is {}x{}; sizing the window to fill it", width, height);
+    } else {
+      Log.warn("Could not query the device panel mode ({}); leaving window at {}x{}",
+               SDL_GetError(), width, height);
+    }
   }
 
   Sint32 posX = g_config.windowPosX;
@@ -337,7 +414,16 @@ bool create_window(AuroraBackend backend) {
       SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, SDL_GetError());
   TRY(SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags), "Failed to set {}: {}",
       SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_GetError());
-  TRY(SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, backend != BACKEND_NULL),
+  if (flags & SDL_WINDOW_OPENGL) {
+    TRY(SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN, true),
+        "Failed to set {}: {}", SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN, SDL_GetError());
+  }
+  // Only the shim (device) path supplies the GL context externally (the firmware
+  // EGL context aurora borrows). On desktop, SDL owns the GL context via
+  // SDL_GL_CreateContext, so the window must NOT be flagged external -- otherwise
+  // SDL skips GL setup and SDL_GL_CreateContext rejects the window.
+  const bool externalGraphicsContext = sdl2ShimDriver && backend != BACKEND_NULL;
+  TRY(SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, externalGraphicsContext),
       "Failed to set {}: {}", SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, SDL_GetError());
   g_window = SDL_CreateWindowWithProperties(props);
   if (g_window == nullptr) {
@@ -433,26 +519,22 @@ AuroraWindowSize get_window_size() {
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
   if (g_frameBufferScale > 0.f) {
-    const auto [baseW, baseH] = vi::configured_fb_size();
+    // Scale the physical drawable, not the GameCube render mode, so the internal resolution is a
+    // fraction of the actual screen. An integer 1/N (e.g. 0.5) then maps each rendered pixel onto
+    // an exact NxN block of panel pixels -- pixel-perfect, no upscale shimmer -- on any display.
+    // (Passing the native size and its own aspect makes scale_frame_buffer_to_aspect a plain
+    // scale-by-g_frameBufferScale; the aspect-fit-to-game block below crops it to 4:3.)
     const auto [scaledW, scaledH] =
-        scale_frame_buffer_to_aspect(static_cast<int>(baseW), static_cast<int>(baseH), g_frameBufferScale,
+        scale_frame_buffer_to_aspect(fb_w, fb_h, g_frameBufferScale,
                                      static_cast<float>(fb_w) / static_cast<float>(fb_h));
     fb_w = scaledW;
     fb_h = scaledH;
   }
   if (g_frameBufferAspectFit) {
-    // smstrikers-port: prefer the aspect VILockAspectRatio was given, which is
-    // the shape the framebuffer is meant to be seen at rather than its pixel
-    // count. Falls back to the mode's own ratio when nothing is locked.
-    float aspect = vi::locked_aspect();
-    if (aspect <= 0.f) {
-      const auto [baseW, baseH] = vi::configured_fb_size();
-      if (baseW > 0 && baseH > 0) {
-        aspect = static_cast<float>(baseW) / static_cast<float>(baseH);
-      }
-    }
-    if (aspect > 0.f) {
-      const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, aspect);
+    const auto [baseW, baseH] = vi::configured_fb_size();
+    if (baseW > 0 && baseH > 0) {
+      const auto [fitW, fitH] =
+          fit_frame_buffer_to_aspect(fb_w, fb_h, static_cast<float>(baseW) / static_cast<float>(baseH));
       fb_w = fitW;
       fb_h = fitH;
     }
@@ -553,14 +635,12 @@ void request_frame_buffer_resize() {
   }
 }
 
-// smstrikers-port: the same work without the deferral; a deferred rebuild would land a frame late, and that frame has black bars.
 void resize_frame_buffer_now() {
   if (g_window != nullptr) {
     resize_swapchain();
   }
 }
 
-// smstrikers-port: non-zero once the caller has pinned the render target to the VI render mode rather than the window, which GXAdjustForOverscan needs to know.
 float get_frame_buffer_scale() { return g_frameBufferScale; }
 
 void set_frame_buffer_scale(float scale) {

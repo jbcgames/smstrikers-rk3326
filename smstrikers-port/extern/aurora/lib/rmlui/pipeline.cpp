@@ -1,13 +1,15 @@
 #include "pipeline.hpp"
 
-#include "../gfx/encoding.hpp"
-#include "../gfx/resources.hpp"
-#include "../gfx/resource_cache.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
 
+#include "../gl/gl_core.hpp"
+#include "../gl/program.hpp"
+#include "../gl/state.hpp"
+
 #include <algorithm>
 #include <array>
+#include <string>
 #include <string_view>
 
 #include <RmlUi/Core/Vertex.h>
@@ -17,657 +19,414 @@ namespace aurora::rmlui {
 namespace {
 using namespace std::string_view_literals;
 
-wgpu::BindGroupLayout g_commonBindGroupLayout;
-wgpu::BindGroupLayout g_imageBindGroupLayout;
-wgpu::BindGroupLayout g_uniformBindGroupLayout;
-wgpu::Sampler g_sampler;
+// WebGPU bind-group *layouts* have no GL equivalent (GL binds textures/uniform
+// blocks by unit/index at draw time), so the three layout globals are gone. Only
+// the shared filtering sampler survives.
+gl::Sampler g_sampler;
 
 constexpr uint32_t DynamicGroup1 = 1u << 1u;
 constexpr uint32_t DynamicGroup2 = 1u << 2u;
 
+// GL uniform-block binding points (S4). The common vertex/gamma block sits at 0
+// (common_bind_group_ref); the per-effect block (gradient/blur/seed/filter/shadow) at
+// 1 (uniform_bind_group_ref). GL_INVALID_INDEX (0xFFFFFFFF) means the program does not
+// declare that block, which is fine -- the inert bind is ignored.
+constexpr gl::GLuint kCommonBlockBinding = 0;
+constexpr gl::GLuint kExtraBlockBinding = 1;
+constexpr gl::GLuint kInvalidBlockIndex = 0xFFFFFFFFu;
+// Texture units: the image sampler `t` is unit 0, the mask sampler `mask_t` unit 1.
+constexpr gl::GLint kImageTextureUnit = 0;
+constexpr gl::GLint kMaskTextureUnit = 1;
+
 constexpr uint64_t CommonUniformBindingSize = AURORA_ALIGN(sizeof(UniformBlock), 16);
 constexpr uint64_t ExtraUniformBindingSize =
     AURORA_ALIGN(std::max({sizeof(BlurUniformBlock), sizeof(DropShadowUniformBlock), sizeof(SimpleFilterUniformBlock),
-                           sizeof(GradientUniformBlock), sizeof(SeedResampleUniformBlock), sizeof(GlassUniformBlock)}),
+                           sizeof(GradientUniformBlock), sizeof(SeedResampleUniformBlock)}),
                  16);
 
-constexpr std::string_view vertexSource = R"(
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-};
+// ---------------------------------------------------------------------------
+// GLSL (#version 300 es) ports of the RmlUi WGSL shaders. Translation rules
+// (mirrors the GX emitter): textureSample(t,s,uv) -> texture(t,uv) (combined
+// samplers, S3); textureLoad -> texelFetch; textureDimensions -> textureSize;
+// @builtin(position) fragment input -> gl_FragCoord; @builtin(vertex_index) ->
+// gl_VertexID; uniform blocks -> layout(std140) uniform Name {...} inst; (S4);
+// atan2(y,x) -> atan(y,x). The `Uniforms` block is declared identically in the
+// vertex and fragment stages (GLSL ES requires matching block declarations).
+// No projection Y-flip here: the MVP flip lives in SetupRenderState (S1d).
+// ---------------------------------------------------------------------------
 
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) uv: vec2<f32>,
-};
+// Geometry vertex shader (also used by the gradient pipeline). The `Uniforms` block is
+// repeated verbatim in every stage that references it (GLSL ES requires the vertex and
+// fragment declarations of a shared block to match exactly).
 
-struct Uniforms {
-    mvp: mat4x4<f32>,
-    translation: vec4<f32>,
-    gamma: f32,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-
-@vertex
-fn main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    var translatedPos = uniforms.translation.xy + in.position;
-
-    out.position = uniforms.mvp * vec4<f32>(translatedPos, 0.0, 1.0);
-    out.color = in.color;
-    out.uv = in.uv;
-    return out;
+constexpr std::string_view vertexSource = R"(#version 300 es
+layout(std140) uniform Uniforms {
+  mat4 mvp;
+  vec4 translation;
+  float gamma;
+} uniforms;
+layout(location = 0) in vec2 in_position;
+layout(location = 1) in vec2 in_uv;
+layout(location = 2) in vec4 in_color;
+out vec4 v_color;
+out vec2 v_uv;
+void main() {
+  vec2 translatedPos = uniforms.translation.xy + in_position;
+  gl_Position = uniforms.mvp * vec4(translatedPos, 0.0, 1.0);
+  v_color = in_color;
+  v_uv = in_uv;
 }
 )"sv;
 
-constexpr std::string_view fragmentSource = R"(
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) uv: vec2<f32>,
-};
-
-struct Uniforms {
-    mvp: mat4x4<f32>,
-    translation: vec4<f32>,
-    gamma: f32,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-
-@fragment
-fn main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = in.color * textureSample(t, s, in.uv);
-    if (uniforms.gamma == 1.0) {
-        return color;
-    }
-    let corrected_color = pow(color.rgb, vec3<f32>(uniforms.gamma));
-    return vec4<f32>(corrected_color, color.a);
-}
-)"sv;
-
-constexpr std::string_view gradientFragmentSource = R"(
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) uv: vec2<f32>,
-};
-
-struct Uniforms {
-    mvp: mat4x4<f32>,
-    translation: vec4<f32>,
-    gamma: f32,
-};
-
-struct GradientUniforms {
-    function: i32,
-    num_stops: i32,
-    p: vec2<f32>,
-    v: vec2<f32>,
-    padding: vec2<f32>,
-    stop_colors: array<vec4<f32>, 16>,
-    stop_positions: array<vec4<f32>, 4>,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(1) @binding(0) var<uniform> gradient: GradientUniforms;
-
-const LINEAR: i32 = 0;
-const RADIAL: i32 = 1;
-const CONIC: i32 = 2;
-const REPEATING_LINEAR: i32 = 3;
-const REPEATING_RADIAL: i32 = 4;
-const REPEATING_CONIC: i32 = 5;
-const PI: f32 = 3.14159265;
-
-fn bayer_dither(position: vec4<f32>) -> f32 {
-    let bayer = array<u32, 64>(
-        0u, 32u, 8u, 40u, 2u, 34u, 10u, 42u,
-        48u, 16u, 56u, 24u, 50u, 18u, 58u, 26u,
-        12u, 44u, 4u, 36u, 14u, 46u, 6u, 38u,
-        60u, 28u, 52u, 20u, 62u, 30u, 54u, 22u,
-        3u, 35u, 11u, 43u, 1u, 33u, 9u, 41u,
-        51u, 19u, 59u, 27u, 49u, 17u, 57u, 25u,
-        15u, 47u, 7u, 39u, 13u, 45u, 5u, 37u,
-        63u, 31u, 55u, 23u, 61u, 29u, 53u, 21u
-    );
-    let x = u32(position.x) % 8u;
-    let y = u32(position.y) % 8u;
-    return (f32(bayer[x + y * 8u]) / 64.0 - 0.5) / 255.0;
-}
-
-fn stop_position(index: i32) -> f32 {
-    let stop_index = u32(index);
-    let group_index = stop_index / 4u;
-    let component_index = stop_index % 4u;
-    return gradient.stop_positions[group_index][component_index];
-}
-
-fn stop_color_mix(t: f32) -> vec4<f32> {
-    var color = gradient.stop_colors[0];
-
-    for (var i = 1; i < 16; i = i + 1) {
-        if (i < gradient.num_stops) {
-            color = mix(color, gradient.stop_colors[u32(i)], smoothstep(stop_position(i - 1), stop_position(i), t));
-        }
-    }
-
-    return color;
-}
-
-@fragment
-fn main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var t = 0.0;
-
-    if (gradient.function == LINEAR || gradient.function == REPEATING_LINEAR) {
-        let dist_square = dot(gradient.v, gradient.v);
-        let v = in.uv - gradient.p;
-        t = dot(gradient.v, v) / dist_square;
-    } else if (gradient.function == RADIAL || gradient.function == REPEATING_RADIAL) {
-        let v = in.uv - gradient.p;
-        t = length(gradient.v * v);
-    } else if (gradient.function == CONIC || gradient.function == REPEATING_CONIC) {
-        let v = in.uv - gradient.p;
-        let rotated = vec2<f32>(
-            gradient.v.x * v.x + gradient.v.y * v.y,
-            -gradient.v.y * v.x + gradient.v.x * v.y
-        );
-        t = 0.5 + atan2(-rotated.x, rotated.y) / (2.0 * PI);
-    }
-
-    if (gradient.function == REPEATING_LINEAR ||
-        gradient.function == REPEATING_RADIAL ||
-        gradient.function == REPEATING_CONIC) {
-        let t0 = stop_position(0);
-        let t1 = stop_position(gradient.num_stops - 1);
-        let span = t1 - t0;
-        t = t0 + (t - t0) - span * floor((t - t0) / span);
-    }
-
-    let color = in.color * stop_color_mix(t);
-    if (uniforms.gamma == 1.0) {
-        return color;
-    }
-    let corrected_color = pow(color.rgb, vec3<f32>(uniforms.gamma));
-    let dithered_color = clamp(corrected_color + vec3<f32>(bayer_dither(in.position)), vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(dithered_color, color.a);
-}
-)"sv;
-
-constexpr std::string_view fullscreenVertexSource = R"(
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-var<private> pos: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(-1.0, 1.0),
-    vec2(-1.0, -3.0),
-    vec2(3.0, 1.0),
-);
-var<private> uvs: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(0.0, 0.0),
-    vec2(0.0, 2.0),
-    vec2(2.0, 0.0),
-);
-
-@vertex
-fn main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(pos[vtxIdx], 0.0, 1.0);
-    out.uv = uvs[vtxIdx];
-    return out;
-}
-)"sv;
-
-constexpr std::string_view blurVertexSource = R"(
-struct BlurUniforms {
-    texel_offset: vec2<f32>,
-    radius: f32,
-    padding: f32,
-    tex_coord_min: vec2<f32>,
-    tex_coord_max: vec2<f32>,
-    weights: vec4<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv0: vec2<f32>,
-    @location(1) uv1: vec2<f32>,
-    @location(2) uv2: vec2<f32>,
-    @location(3) uv3: vec2<f32>,
-    @location(4) uv4: vec2<f32>,
-    @location(5) uv5: vec2<f32>,
-    @location(6) uv6: vec2<f32>,
-};
-
-@group(2) @binding(0) var<uniform> blur: BlurUniforms;
-
-const BLUR_NUM_WEIGHTS: i32 = 4;
-
-var<private> pos: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(-1.0, 1.0),
-    vec2(-1.0, -3.0),
-    vec2(3.0, 1.0),
-);
-var<private> uvs: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2(0.0, 0.0),
-    vec2(0.0, 2.0),
-    vec2(2.0, 0.0),
-);
-
-fn blur_uv(uv: vec2<f32>, index: i32) -> vec2<f32> {
-    return uv - f32(index - BLUR_NUM_WEIGHTS + 1) * blur.texel_offset;
-}
-
-@vertex
-fn main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
-    let uv = uvs[vtxIdx];
-    var out: VertexOutput;
-    out.position = vec4<f32>(pos[vtxIdx], 0.0, 1.0);
-    out.uv0 = blur_uv(uv, 0);
-    out.uv1 = blur_uv(uv, 1);
-    out.uv2 = blur_uv(uv, 2);
-    out.uv3 = blur_uv(uv, 3);
-    out.uv4 = blur_uv(uv, 4);
-    out.uv5 = blur_uv(uv, 5);
-    out.uv6 = blur_uv(uv, 6);
-    return out;
-}
-)"sv;
-
-constexpr std::string_view blitFragmentSource = R"(
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    return textureSample(t, s, uv);
-}
-)"sv;
-
-constexpr std::string_view opaqueBlitFragmentSource = R"(
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let color = textureSample(t, s, uv);
-    return vec4<f32>(color.rgb, 1.0);
-}
-)"sv;
-
-constexpr std::string_view seedResampleFragmentSource = R"(
-struct SeedUniforms {
-    sampler_mode: u32,
-    frame_width: f32,
-    frame_height: f32,
-    pad: u32,
-};
-
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> uniforms: SeedUniforms;
-
-fn sample_by_pixel(pixel: vec2<i32>) -> vec4<f32> {
-    let source_dims = textureDimensions(t);
-    let max_coord = vec2<i32>(source_dims) - vec2<i32>(1, 1);
-    let coord = clamp(pixel, vec2<i32>(0, 0), max_coord);
-    return textureLoad(t, coord, 0);
-}
-
-fn sample_area(frag_position: vec4<f32>) -> vec4<f32> {
-    let source_size = vec2<f32>(textureDimensions(t));
-    let target_size = max(vec2<f32>(uniforms.frame_width, uniforms.frame_height), vec2<f32>(1.0, 1.0));
-
-    let source_min = clamp((frag_position.xy - vec2<f32>(0.5, 0.5)) / target_size,
-                           vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0)) * source_size;
-    let source_max = clamp((frag_position.xy + vec2<f32>(0.5, 0.5)) / target_size,
-                           vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0)) * source_size;
-
-    let first_pixel = vec2<i32>(floor(source_min));
-    let last_pixel = vec2<i32>(ceil(source_max));
-    let max_iterations: i32 = 16;
-
-    var avg_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    var total_weight = 0.0;
-
-    for (var iy: i32 = 0; iy < max_iterations; iy = iy + 1) {
-        let source_y = first_pixel.y + iy;
-        if (source_y < last_pixel.y) {
-            let y0 = f32(source_y);
-            let weight_y = max(min(source_max.y, y0 + 1.0) - max(source_min.y, y0), 0.0);
-
-            for (var ix: i32 = 0; ix < max_iterations; ix = ix + 1) {
-                let source_x = first_pixel.x + ix;
-                if (source_x < last_pixel.x) {
-                    let x0 = f32(source_x);
-                    let weight_x = max(min(source_max.x, x0 + 1.0) - max(source_min.x, x0), 0.0);
-                    let weight = weight_x * weight_y;
-                    avg_color += weight * sample_by_pixel(vec2<i32>(source_x, source_y));
-                    total_weight += weight;
-                }
-            }
-        }
-    }
-
-    return avg_color / max(total_weight, 0.000001);
-}
-
-@fragment
-fn main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    var color = textureSample(t, s, uv);
-    if (uniforms.sampler_mode == 1u) {
-        color = sample_area(position);
-    }
-    return vec4(color.rgb, 1.0);
-}
-)"sv;
-
-constexpr std::string_view simpleFilterFragmentSource = R"(
-struct SimpleFilterUniforms {
-    matrix: mat4x4<f32>,
-    opacity: vec4<f32>,
-};
-
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> simple_filter: SimpleFilterUniforms;
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(t, s, uv);
-    let transformed_color = simple_filter.matrix * tex_color;
-    return vec4<f32>(transformed_color.rgb, tex_color.a) * simple_filter.opacity.x;
-}
-)"sv;
-
-constexpr std::string_view maskImageFragmentSource = R"(
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var mask_t: texture_2d<f32>;
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(t, s, uv);
-    let mask_alpha = textureSample(mask_t, s, uv).a;
-    return tex_color * mask_alpha;
-}
-)"sv;
-
-constexpr std::string_view blurFragmentSource = R"(
-struct BlurUniforms {
-    texel_offset: vec2<f32>,
-    radius: f32,
-    padding: f32,
-    tex_coord_min: vec2<f32>,
-    tex_coord_max: vec2<f32>,
-    weights: vec4<f32>,
-};
-
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> blur: BlurUniforms;
-
-fn get_weight(index: i32) -> f32 {
-    return blur.weights[u32(abs(index))];
-}
-
-fn sample_blur(sample_uv: vec2<f32>, offset_index: i32) -> vec4<f32> {
-    let in_region = step(blur.tex_coord_min, sample_uv) * step(sample_uv, blur.tex_coord_max);
-    return textureSample(t, s, sample_uv) * get_weight(offset_index) * in_region.x * in_region.y;
-}
-
-@fragment
-fn main(@location(0) uv0: vec2<f32>, @location(1) uv1: vec2<f32>, @location(2) uv2: vec2<f32>,
-        @location(3) uv3: vec2<f32>, @location(4) uv4: vec2<f32>, @location(5) uv5: vec2<f32>,
-        @location(6) uv6: vec2<f32>) -> @location(0) vec4<f32> {
-    var color = sample_blur(uv0, -3);
-    color += sample_blur(uv1, -2);
-    color += sample_blur(uv2, -1);
-    color += sample_blur(uv3, 0);
-    color += sample_blur(uv4, 1);
-    color += sample_blur(uv5, 2);
-    color += sample_blur(uv6, 3);
-    return color;
-}
-)"sv;
-
-constexpr std::string_view regionBlitFragmentSource = R"(
-struct BlurUniforms {
-    texel_offset: vec2<f32>,
-    radius: f32,
-    padding: f32,
-    tex_coord_min: vec2<f32>,
-    tex_coord_max: vec2<f32>,
-    weights: vec4<f32>,
-};
-
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> blur: BlurUniforms;
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let sample_uv = mix(blur.tex_coord_min, blur.tex_coord_max, uv);
-    return textureSample(t, s, sample_uv);
-}
-)"sv;
-
-constexpr std::string_view dropShadowFragmentSource = R"(
-struct DropShadowUniforms {
-    color: vec4<f32>,
-    uv_offset: vec2<f32>,
-    tex_coord_min: vec2<f32>,
-    tex_coord_max: vec2<f32>,
-};
-
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> shadow: DropShadowUniforms;
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let sample_uv = uv - shadow.uv_offset;
-    let in_region = step(shadow.tex_coord_min, sample_uv) * step(sample_uv, shadow.tex_coord_max);
-    let alpha = textureSample(t, s, sample_uv).a * in_region.x * in_region.y;
-    return shadow.color * alpha;
-}
-)"sv;
-
-constexpr std::string_view glassFragmentSource = R"(
-struct GlassUniforms {
-    rect_center: vec2<f32>,
-    rect_half_size: vec2<f32>,
-    corner_radii: vec4<f32>,
-    tint: vec4<f32>,
-    frame_size: vec2<f32>,
-    tex_coord_min: vec2<f32>,
-    tex_coord_max: vec2<f32>,
-    bezel_width: f32,
-    refraction: f32,
-    specular: f32,
-    saturation: f32,
-    profile: f32,
-    dome: f32,
-    edge_fades: vec4<f32>, // per-edge bezel strength (top, right, bottom, left)
-    light_dir: vec2<f32>,  // direction from surfaces toward the specular light
-    _padding: vec2<f32>,
-};
-
-@group(0) @binding(1) var s: sampler;
-@group(1) @binding(0) var t: texture_2d<f32>;
-@group(2) @binding(0) var<uniform> glass: GlassUniforms;
-
-const SLOPE_MAX: f32 = 4.0;
-// tan(atan(SLOPE_MAX) - asin(sin(atan(SLOPE_MAX)) / IOR)) where IOR == 1.5
-const TAN_BEND_MAX: f32 = 0.7185;
-
-fn corner_radius(p: vec2<f32>) -> f32 {
-    return select(
-        select(glass.corner_radii.z, glass.corner_radii.y, p.y < 0.0),
-        select(glass.corner_radii.w, glass.corner_radii.x, p.y < 0.0),
-        p.x < 0.0
-    );
-}
-
-fn sd_rounded_rect(p: vec2<f32>) -> f32 {
-    let r = corner_radius(p);
-    let q = abs(p) - glass.rect_half_size + vec2<f32>(r);
-    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
-}
-
-fn sdf_normal(p: vec2<f32>) -> vec2<f32> {
-    let e = 0.5;
-    let grad = vec2<f32>(
-        sd_rounded_rect(p + vec2<f32>(e, 0.0)) - sd_rounded_rect(p - vec2<f32>(e, 0.0)),
-        sd_rounded_rect(p + vec2<f32>(0.0, e)) - sd_rounded_rect(p - vec2<f32>(0.0, e)),
-    );
-    return grad / max(length(grad), 1e-4);
-}
-
-fn bezel_height(x: f32) -> f32 {
-    let convex = pow(max(1.0 - pow(1.0 - x, 4.0), 0.0), 0.25);
-    let lip = mix(convex, 1.0 - convex, smoothstep(0.0, 1.0, x));
-    return mix(convex, lip, glass.profile);
-}
-
-@fragment
-fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let p = uv * glass.frame_size - glass.rect_center;
-    let d = sd_rounded_rect(p);
-    let n = sdf_normal(p);
-
-    // Per-edge bezel fade
-    var edge_fade = 1.0;
-    edge_fade *= mix(1.0, glass.edge_fades.x, clamp(-n.y, 0.0, 1.0));
-    edge_fade *= mix(1.0, glass.edge_fades.y, clamp(n.x, 0.0, 1.0));
-    edge_fade *= mix(1.0, glass.edge_fades.z, clamp(n.y, 0.0, 1.0));
-    edge_fade *= mix(1.0, glass.edge_fades.w, clamp(-n.x, 0.0, 1.0));
-
-    // Bezel coordinate: 0 at the rim, 1 at the inner end of the band
-    let x = clamp(-d, 0.0, glass.bezel_width) / max(glass.bezel_width, 1.0);
-
-    // Calculate slope to tilt the surface normal
-    let inv = 1.0 - x;
-    let he = 0.005;
-    var slope = (bezel_height(min(x + he, 1.0)) - bezel_height(max(x - he, 0.0))) / (2.0 * he);
-    slope = clamp(slope, -SLOPE_MAX, SLOPE_MAX);
-
-    // Snell deflection
-    let theta = atan(abs(slope));
-    let bend = theta - asin(clamp(sin(theta) / 1.5, -1.0, 1.0));
-    let disp = glass.refraction * (tan(bend) / TAN_BEND_MAX) * sign(slope) * edge_fade;
-
-    // Full-surface dome
-    let dome_disp = -p * glass.dome;
-
-    let sample_uv = clamp(uv + (n * disp + dome_disp) / glass.frame_size, glass.tex_coord_min, glass.tex_coord_max);
-    var color = textureSample(t, s, sample_uv);
-
-    // Saturation
-    let luma = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    color = vec4<f32>(mix(vec3<f32>(luma), color.rgb, glass.saturation), color.a);
-
-    // Tint
-    let tint = glass.tint * mix(1.0, mix(0.35, 1.0, smoothstep(0.0, 1.0, x)), edge_fade);
-    color = vec4<f32>(tint.rgb + color.rgb * (1.0 - tint.a),
-                      tint.a + color.a * (1.0 - tint.a));
-
-    // Specular rim
-    let rim = mix(0.4, 1.0, 0.5 + 0.5 * dot(n, glass.light_dir));
-    color = vec4<f32>(color.rgb + glass.specular * rim * inv * inv * edge_fade, color.a);
-
-    // Outside of the shape, pass the background through
-    let passthrough = textureSample(t, s, clamp(uv, glass.tex_coord_min, glass.tex_coord_max));
-    return mix(passthrough, color, 1.0 - smoothstep(-0.75, 0.75, d));
-}
-)"sv;
-
-wgpu::ComputeState compile_shader(std::string_view wgslSource, std::string_view label) {
-  const wgpu::ShaderSourceWGSL source{
-      wgpu::ShaderSourceWGSL::Init{
-          .nextInChain = nullptr,
-          .code = wgslSource,
-      },
-  };
-  const wgpu::ShaderModuleDescriptor desc{
-      .nextInChain = &source,
-      .label = label,
-  };
-  return {
-      .module = webgpu::g_device.CreateShaderModule(&desc),
-      .entryPoint = "main",
-  };
-}
-
-wgpu::BlendState blend_state(BlendMode mode) {
-  switch (mode) {
-  case BlendMode::Premultiplied:
-    return {
-        .color =
-            {
-                .operation = wgpu::BlendOperation::Add,
-                .srcFactor = wgpu::BlendFactor::One,
-                .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha,
-            },
-        .alpha =
-            {
-                .operation = wgpu::BlendOperation::Add,
-                .srcFactor = wgpu::BlendFactor::One,
-                .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha,
-            },
-    };
-  case BlendMode::None:
-  default:
-    return {};
+constexpr std::string_view fragmentSource = R"(#version 300 es
+precision highp float;
+layout(std140) uniform Uniforms {
+  mat4 mvp;
+  vec4 translation;
+  float gamma;
+} uniforms;
+uniform sampler2D t;
+in vec4 v_color;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  vec4 color = v_color * texture(t, v_uv);
+  if (uniforms.gamma == 1.0) {
+    out_color = color;
+  } else {
+    vec3 corrected = pow(color.rgb, vec3(uniforms.gamma));
+    out_color = vec4(corrected, color.a);
   }
 }
+)"sv;
 
-const wgpu::PipelineLayout create_pipeline_layout(PipelineKind kind) {
-  std::array<wgpu::BindGroupLayout, 3> layouts{};
-  uint32_t layoutCount = 0;
-  layouts[layoutCount++] = g_commonBindGroupLayout;
+constexpr std::string_view gradientFragmentSource = R"(#version 300 es
+precision highp float;
+precision highp int;
+layout(std140) uniform Uniforms {
+  mat4 mvp;
+  vec4 translation;
+  float gamma;
+} uniforms;
+layout(std140) uniform GradientUniforms {
+  int function;
+  int num_stops;
+  vec2 p;
+  vec2 v;
+  vec2 padding;
+  vec4 stop_colors[16];
+  vec4 stop_positions[4];
+} gradient;
+in vec4 v_color;
+in vec2 v_uv;
+out vec4 out_color;
 
-  switch (kind) {
-  case PipelineKind::Gradient:
-    layouts[layoutCount++] = g_uniformBindGroupLayout;
-    break;
-  case PipelineKind::MaskImage:
-    layouts[layoutCount++] = g_imageBindGroupLayout;
-    layouts[layoutCount++] = g_imageBindGroupLayout;
-    break;
-  case PipelineKind::Blur:
-  case PipelineKind::RegionBlit:
-  case PipelineKind::DropShadow:
-  case PipelineKind::SimpleFilter:
-  case PipelineKind::SeedResample:
-  case PipelineKind::Glass:
-    layouts[layoutCount++] = g_imageBindGroupLayout;
-    layouts[layoutCount++] = g_uniformBindGroupLayout;
-    break;
-  case PipelineKind::Geometry:
-  case PipelineKind::Blit:
-  case PipelineKind::OpaqueBlit:
-  default:
-    layouts[layoutCount++] = g_imageBindGroupLayout;
-    break;
-  }
+const int LINEAR = 0;
+const int RADIAL = 1;
+const int CONIC = 2;
+const int REPEATING_LINEAR = 3;
+const int REPEATING_RADIAL = 4;
+const int REPEATING_CONIC = 5;
+const float PI = 3.14159265;
 
-  const wgpu::PipelineLayoutDescriptor layoutDesc{
-      .bindGroupLayoutCount = layoutCount,
-      .bindGroupLayouts = layouts.data(),
-  };
-  return webgpu::g_device.CreatePipelineLayout(&layoutDesc);
+float bayer_dither(vec2 position) {
+  int bayer[64] = int[64](
+    0, 32, 8, 40, 2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44, 4, 36, 14, 46, 6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+    3, 35, 11, 43, 1, 33, 9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47, 7, 39, 13, 45, 5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21);
+  int x = int(position.x) % 8;
+  int y = int(position.y) % 8;
+  return (float(bayer[x + y * 8]) / 64.0 - 0.5) / 255.0;
 }
 
-const std::string_view fragment_source(PipelineKind kind) {
+float stop_position(int index) {
+  int group_index = index / 4;
+  int component_index = index % 4;
+  return gradient.stop_positions[group_index][component_index];
+}
+
+vec4 stop_color_mix(float t) {
+  vec4 color = gradient.stop_colors[0];
+  for (int i = 1; i < 16; i++) {
+    if (i < gradient.num_stops) {
+      color = mix(color, gradient.stop_colors[i], smoothstep(stop_position(i - 1), stop_position(i), t));
+    }
+  }
+  return color;
+}
+
+void main() {
+  float t = 0.0;
+  if (gradient.function == LINEAR || gradient.function == REPEATING_LINEAR) {
+    float dist_square = dot(gradient.v, gradient.v);
+    vec2 vv = v_uv - gradient.p;
+    t = dot(gradient.v, vv) / dist_square;
+  } else if (gradient.function == RADIAL || gradient.function == REPEATING_RADIAL) {
+    vec2 vv = v_uv - gradient.p;
+    t = length(gradient.v * vv);
+  } else if (gradient.function == CONIC || gradient.function == REPEATING_CONIC) {
+    vec2 vv = v_uv - gradient.p;
+    vec2 rotated = vec2(gradient.v.x * vv.x + gradient.v.y * vv.y,
+                        -gradient.v.y * vv.x + gradient.v.x * vv.y);
+    t = 0.5 + atan(-rotated.x, rotated.y) / (2.0 * PI);
+  }
+  if (gradient.function == REPEATING_LINEAR ||
+      gradient.function == REPEATING_RADIAL ||
+      gradient.function == REPEATING_CONIC) {
+    float t0 = stop_position(0);
+    float t1 = stop_position(gradient.num_stops - 1);
+    float span = t1 - t0;
+    t = t0 + (t - t0) - span * floor((t - t0) / span);
+  }
+  vec4 color = v_color * stop_color_mix(t);
+  if (uniforms.gamma == 1.0) {
+    out_color = color;
+  } else {
+    vec3 corrected = pow(color.rgb, vec3(uniforms.gamma));
+    vec3 dithered = clamp(corrected + vec3(bayer_dither(gl_FragCoord.xy)), vec3(0.0), vec3(1.0));
+    out_color = vec4(dithered, color.a);
+  }
+}
+)"sv;
+
+// Fullscreen-triangle vertex shader (gl_VertexID; no vertex buffer). Orientation-preserving in GL:
+// v=0 at NDC.y=-1 (dest row 0), so a fullscreen copy maps source row R -> dest row R. The whole GL
+// pipeline is bottom-left origin (GX scene target, every RmlUi render target, the window), so
+// preserving here keeps the entire chain -- scene seed, layer copies, blur/filter passes and the
+// final present composite -- consistently GL-native with no explicit V-flip anywhere.
+constexpr std::string_view fullscreenVertexSource = R"(#version 300 es
+out vec2 v_uv;
+void main() {
+  const vec2 positions[3] = vec2[3](vec2(-1.0, 1.0), vec2(-1.0, -3.0), vec2(3.0, 1.0));
+  const vec2 uvs[3] = vec2[3](vec2(0.0, 1.0), vec2(0.0, -1.0), vec2(2.0, 1.0));
+  gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+  v_uv = uvs[gl_VertexID];
+}
+)"sv;
+
+// Blur/region fullscreen vertex shader: pre-computes seven tap UVs from the texel offset.
+constexpr std::string_view blurVertexSource = R"(#version 300 es
+layout(std140) uniform BlurUniforms {
+  vec2 texel_offset;
+  float radius;
+  float padding;
+  vec2 tex_coord_min;
+  vec2 tex_coord_max;
+  vec4 weights;
+} blur;
+out vec2 v_uv0;
+out vec2 v_uv1;
+out vec2 v_uv2;
+out vec2 v_uv3;
+out vec2 v_uv4;
+out vec2 v_uv5;
+out vec2 v_uv6;
+const int BLUR_NUM_WEIGHTS = 4;
+vec2 blur_uv(vec2 uv, int index) {
+  return uv - float(index - BLUR_NUM_WEIGHTS + 1) * blur.texel_offset;
+}
+void main() {
+  const vec2 positions[3] = vec2[3](vec2(-1.0, 1.0), vec2(-1.0, -3.0), vec2(3.0, 1.0));
+  const vec2 uvs[3] = vec2[3](vec2(0.0, 1.0), vec2(0.0, -1.0), vec2(2.0, 1.0));
+  vec2 uv = uvs[gl_VertexID];
+  gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+  v_uv0 = blur_uv(uv, 0);
+  v_uv1 = blur_uv(uv, 1);
+  v_uv2 = blur_uv(uv, 2);
+  v_uv3 = blur_uv(uv, 3);
+  v_uv4 = blur_uv(uv, 4);
+  v_uv5 = blur_uv(uv, 5);
+  v_uv6 = blur_uv(uv, 6);
+}
+)"sv;
+
+constexpr std::string_view blitFragmentSource = R"(#version 300 es
+precision highp float;
+uniform sampler2D t;
+in vec2 v_uv;
+out vec4 out_color;
+void main() { out_color = texture(t, v_uv); }
+)"sv;
+
+constexpr std::string_view opaqueBlitFragmentSource = R"(#version 300 es
+precision highp float;
+uniform sampler2D t;
+in vec2 v_uv;
+out vec4 out_color;
+void main() { out_color = vec4(texture(t, v_uv).rgb, 1.0); }
+)"sv;
+
+constexpr std::string_view seedResampleFragmentSource = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D t;
+layout(std140) uniform SeedUniforms {
+  uint sampler_mode;
+  float frame_width;
+  float frame_height;
+  uint pad;
+} seed;
+in vec2 v_uv;
+out vec4 out_color;
+
+vec4 sample_by_pixel(ivec2 pixel) {
+  ivec2 source_dims = textureSize(t, 0);
+  ivec2 max_coord = source_dims - ivec2(1, 1);
+  ivec2 coord = clamp(pixel, ivec2(0, 0), max_coord);
+  return texelFetch(t, coord, 0);
+}
+
+vec4 sample_area(vec2 frag_position) {
+  vec2 source_size = vec2(textureSize(t, 0));
+  vec2 target_size = max(vec2(seed.frame_width, seed.frame_height), vec2(1.0, 1.0));
+  vec2 source_min = clamp((frag_position - vec2(0.5, 0.5)) / target_size, vec2(0.0), vec2(1.0)) * source_size;
+  vec2 source_max = clamp((frag_position + vec2(0.5, 0.5)) / target_size, vec2(0.0), vec2(1.0)) * source_size;
+  ivec2 first_pixel = ivec2(floor(source_min));
+  ivec2 last_pixel = ivec2(ceil(source_max));
+  const int max_iterations = 16;
+  vec4 avg_color = vec4(0.0);
+  float total_weight = 0.0;
+  for (int iy = 0; iy < max_iterations; iy++) {
+    int source_y = first_pixel.y + iy;
+    if (source_y < last_pixel.y) {
+      float y0 = float(source_y);
+      float weight_y = max(min(source_max.y, y0 + 1.0) - max(source_min.y, y0), 0.0);
+      for (int ix = 0; ix < max_iterations; ix++) {
+        int source_x = first_pixel.x + ix;
+        if (source_x < last_pixel.x) {
+          float x0 = float(source_x);
+          float weight_x = max(min(source_max.x, x0 + 1.0) - max(source_min.x, x0), 0.0);
+          float weight = weight_x * weight_y;
+          avg_color += weight * sample_by_pixel(ivec2(source_x, source_y));
+          total_weight += weight;
+        }
+      }
+    }
+  }
+  return avg_color / max(total_weight, 0.000001);
+}
+
+void main() {
+  // Scene, RmlUi targets and window are all GL-native (bottom-left origin), so this seed just
+  // preserves orientation like every other fullscreen pass -- no V-flip needed.
+  vec4 color = texture(t, v_uv);
+  if (seed.sampler_mode == 1u) {
+    color = sample_area(gl_FragCoord.xy);
+  }
+  out_color = vec4(color.rgb, 1.0);
+}
+)"sv;
+
+constexpr std::string_view simpleFilterFragmentSource = R"(#version 300 es
+precision highp float;
+uniform sampler2D t;
+layout(std140) uniform SimpleFilterUniforms {
+  mat4 matrix;
+  vec4 opacity;
+} simple_filter;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  vec4 tex_color = texture(t, v_uv);
+  vec4 transformed = simple_filter.matrix * tex_color;
+  out_color = vec4(transformed.rgb, tex_color.a) * simple_filter.opacity.x;
+}
+)"sv;
+
+constexpr std::string_view maskImageFragmentSource = R"(#version 300 es
+precision highp float;
+uniform sampler2D t;
+uniform sampler2D mask_t;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  vec4 tex_color = texture(t, v_uv);
+  float mask_alpha = texture(mask_t, v_uv).a;
+  out_color = tex_color * mask_alpha;
+}
+)"sv;
+
+constexpr std::string_view blurFragmentSource = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D t;
+layout(std140) uniform BlurUniforms {
+  vec2 texel_offset;
+  float radius;
+  float padding;
+  vec2 tex_coord_min;
+  vec2 tex_coord_max;
+  vec4 weights;
+} blur;
+in vec2 v_uv0;
+in vec2 v_uv1;
+in vec2 v_uv2;
+in vec2 v_uv3;
+in vec2 v_uv4;
+in vec2 v_uv5;
+in vec2 v_uv6;
+out vec4 out_color;
+float get_weight(int index) { return blur.weights[abs(index)]; }
+vec4 sample_blur(vec2 sample_uv, int offset_index) {
+  vec2 in_region = step(blur.tex_coord_min, sample_uv) * step(sample_uv, blur.tex_coord_max);
+  return texture(t, sample_uv) * get_weight(offset_index) * in_region.x * in_region.y;
+}
+void main() {
+  vec4 color = sample_blur(v_uv0, -3);
+  color += sample_blur(v_uv1, -2);
+  color += sample_blur(v_uv2, -1);
+  color += sample_blur(v_uv3, 0);
+  color += sample_blur(v_uv4, 1);
+  color += sample_blur(v_uv5, 2);
+  color += sample_blur(v_uv6, 3);
+  out_color = color;
+}
+)"sv;
+
+constexpr std::string_view regionBlitFragmentSource = R"(#version 300 es
+precision highp float;
+uniform sampler2D t;
+layout(std140) uniform BlurUniforms {
+  vec2 texel_offset;
+  float radius;
+  float padding;
+  vec2 tex_coord_min;
+  vec2 tex_coord_max;
+  vec4 weights;
+} blur;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  vec2 sample_uv = mix(blur.tex_coord_min, blur.tex_coord_max, v_uv);
+  out_color = texture(t, sample_uv);
+}
+)"sv;
+
+constexpr std::string_view dropShadowFragmentSource = R"(#version 300 es
+precision highp float;
+uniform sampler2D t;
+layout(std140) uniform DropShadowUniforms {
+  vec4 color;
+  vec2 uv_offset;
+  vec2 tex_coord_min;
+  vec2 tex_coord_max;
+} shadow;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  vec2 sample_uv = v_uv - shadow.uv_offset;
+  vec2 in_region = step(shadow.tex_coord_min, sample_uv) * step(sample_uv, shadow.tex_coord_max);
+  float alpha = texture(t, sample_uv).a * in_region.x * in_region.y;
+  out_color = shadow.color * alpha;
+}
+)"sv;
+
+std::string_view fragment_source(PipelineKind kind) {
   switch (kind) {
   case PipelineKind::Geometry:
     return fragmentSource;
@@ -687,15 +446,13 @@ const std::string_view fragment_source(PipelineKind kind) {
     return simpleFilterFragmentSource;
   case PipelineKind::MaskImage:
     return maskImageFragmentSource;
-  case PipelineKind::Glass:
-    return glassFragmentSource;
   case PipelineKind::Blit:
   default:
     return blitFragmentSource;
   }
 }
 
-const std::string_view vertex_source(VertexLayoutKind kind) {
+std::string_view vertex_source(VertexLayoutKind kind) {
   switch (kind) {
   case VertexLayoutKind::Geometry:
     return vertexSource;
@@ -707,269 +464,197 @@ const std::string_view vertex_source(VertexLayoutKind kind) {
   }
 }
 
+// Compile + link the GLSL pair and wire fixed bindings: the `Uniforms` block -> point 0,
+// any per-effect block -> point 1, the `t`/`mask_t` samplers -> units 0/1. Runs on a
+// GL-context thread (the pipeline compiler share context or the render worker), so it
+// issues GL directly (no marshal), matching gx::create_pipeline and tex_copy_conv.
+gl::GLuint compile_rml_program(VertexLayoutKind vertexLayout, PipelineKind kind, const char* label) {
+  const std::string vs{vertex_source(vertexLayout)};
+  const std::string fs{fragment_source(kind)};
+  const gl::GLuint program = gl::compile_program(vs.c_str(), fs.c_str(), label);
+  if (program == 0) {
+    return 0;
+  }
+  const gl::GLuint commonIndex = gl::gl.GetUniformBlockIndex(program, "Uniforms");
+  if (commonIndex != kInvalidBlockIndex) {
+    gl::gl.UniformBlockBinding(program, commonIndex, kCommonBlockBinding);
+  }
+  for (const char* name :
+       {"GradientUniforms", "BlurUniforms", "SeedUniforms", "SimpleFilterUniforms", "DropShadowUniforms"}) {
+    const gl::GLuint index = gl::gl.GetUniformBlockIndex(program, name);
+    if (index != kInvalidBlockIndex) {
+      gl::gl.UniformBlockBinding(program, index, kExtraBlockBinding);
+    }
+  }
+  gl::gl.UseProgram(program);
+  const gl::GLint imageLoc = gl::gl.GetUniformLocation(program, "t");
+  if (imageLoc >= 0) {
+    gl::gl.Uniform1i(imageLoc, kImageTextureUnit);
+  }
+  const gl::GLint maskLoc = gl::gl.GetUniformLocation(program, "mask_t");
+  if (maskLoc >= 0) {
+    gl::gl.Uniform1i(maskLoc, kMaskTextureUnit);
+  }
+  gl::gl.UseProgram(0);
+  // A program linked on the compiler share context must be flushed to be visible on the
+  // render worker's context.
+  gl::gl.Flush();
+  return program;
+}
+
 } // namespace
 
 void initialize_pipeline() {
-  constexpr std::array commonEntries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
-          .buffer =
-              {
-                  .type = wgpu::BufferBindingType::Uniform,
-                  .hasDynamicOffset = true,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 1,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .sampler =
-              {
-                  .type = wgpu::SamplerBindingType::Filtering,
-              },
-      },
-  };
-  const wgpu::BindGroupLayoutDescriptor commonDesc{
-      .entryCount = commonEntries.size(),
-      .entries = commonEntries.data(),
-  };
-  g_commonBindGroupLayout = webgpu::g_device.CreateBindGroupLayout(&commonDesc);
-
-  constexpr std::array imageEntries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture =
-              {
-                  .sampleType = wgpu::TextureSampleType::Float,
-                  .viewDimension = wgpu::TextureViewDimension::e2D,
-              },
-      },
-  };
-  const wgpu::BindGroupLayoutDescriptor imageDesc{
-      .entryCount = imageEntries.size(),
-      .entries = imageEntries.data(),
-  };
-  g_imageBindGroupLayout = webgpu::g_device.CreateBindGroupLayout(&imageDesc);
-
-  constexpr std::array uniformEntries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
-          .buffer =
-              {
-                  .type = wgpu::BufferBindingType::Uniform,
-                  .hasDynamicOffset = true,
-              },
-      },
-  };
-  const wgpu::BindGroupLayoutDescriptor uniformDesc{
-      .entryCount = uniformEntries.size(),
-      .entries = uniformEntries.data(),
-  };
-  g_uniformBindGroupLayout = webgpu::g_device.CreateBindGroupLayout(&uniformDesc);
-
-  constexpr wgpu::SamplerDescriptor samplerDesc{
-      .addressModeU = wgpu::AddressMode::Repeat,
-      .addressModeV = wgpu::AddressMode::Repeat,
-      .addressModeW = wgpu::AddressMode::Repeat,
-      .magFilter = wgpu::FilterMode::Linear,
-      .minFilter = wgpu::FilterMode::Linear,
-      .mipmapFilter = wgpu::MipmapFilterMode::Linear,
+  // The three WebGPU bind-group layouts are gone (no GL equivalent). Only the shared
+  // filtering sampler remains; gfx::sampler_ref is the GL-native replacement for the
+  // old g_device.CreateSampler.
+  constexpr gl::SamplerDescriptor samplerDesc{
+      .addressU = gl::AddressMode::Repeat,
+      .addressV = gl::AddressMode::Repeat,
+      .addressW = gl::AddressMode::Repeat,
+      .magFilter = gl::FilterMode::Linear,
+      .minFilter = gl::FilterMode::Linear,
+      .mipmapFilter = gl::MipmapFilterMode::Linear,
       .maxAnisotropy = 1,
   };
-  g_sampler = webgpu::g_device.CreateSampler(&samplerDesc);
+  g_sampler = gfx::sampler_ref(samplerDesc);
 }
 
 void shutdown_pipeline() {
-  g_commonBindGroupLayout = {};
-  g_imageBindGroupLayout = {};
-  g_uniformBindGroupLayout = {};
   g_sampler = {};
 }
 
-gfx::BindGroupRef texture_bind_group_ref(const wgpu::TextureView& view) {
-  const std::array entries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .textureView = view,
-      },
-  };
-  const wgpu::BindGroupDescriptor desc{
-      .layout = g_imageBindGroupLayout,
-      .entryCount = entries.size(),
-      .entries = entries.data(),
-  };
-  return gfx::bind_group_ref(desc);
+gfx::BindGroupRef texture_bind_group_ref(const gl::Texture& view) {
+  gl::BindingSet set{};
+  set.textures[kImageTextureUnit].texture = view.id;
+  // The common filtering sampler pairs with the image texture on GL (WebGPU kept the
+  // sampler in group 0; GL binds texture+sampler together at the unit).
+  set.textures[kImageTextureUnit].sampler = g_sampler.id;
+  return gfx::bind_group_ref(set);
+}
+
+gfx::BindGroupRef mask_bind_group_ref(const gl::Texture& imageView, const gl::Texture& maskView) {
+  // maskImage samples two textures in one draw: `t` at unit 0 and `mask_t` at unit 1.
+  // A single bind group carries both so the second SetBindGroup does not clobber unit 0.
+  gl::BindingSet set{};
+  set.textures[kImageTextureUnit].texture = imageView.id;
+  set.textures[kImageTextureUnit].sampler = g_sampler.id;
+  set.textures[kMaskTextureUnit].texture = maskView.id;
+  set.textures[kMaskTextureUnit].sampler = g_sampler.id;
+  return gfx::bind_group_ref(set);
 }
 
 gfx::BindGroupRef common_bind_group_ref() {
-  const std::array entries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .buffer = gfx::detail::resources().uniformBuffer,
-          .offset = 0,
-          .size = CommonUniformBindingSize,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 1,
-          .sampler = g_sampler,
-      },
+  gl::BindingSet set{};
+  set.buffers[0] = gl::BindingSet::BufferBinding{
+      .buffer = gfx::g_uniformBuffer.id,
+      .binding = kCommonBlockBinding,
+      .offset = 0,
+      .size = static_cast<uint32_t>(CommonUniformBindingSize),
+      .dynamic = true,
   };
-  const wgpu::BindGroupDescriptor desc{
-      .layout = g_commonBindGroupLayout,
-      .entryCount = entries.size(),
-      .entries = entries.data(),
-  };
-  return gfx::bind_group_ref(desc);
+  set.bufferCount = 1;
+  return gfx::bind_group_ref(set);
 }
 
 gfx::BindGroupRef uniform_bind_group_ref() {
-  const std::array entries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .buffer = gfx::detail::resources().uniformBuffer,
-          .offset = 0,
-          .size = ExtraUniformBindingSize,
-      },
+  gl::BindingSet set{};
+  set.buffers[0] = gl::BindingSet::BufferBinding{
+      .buffer = gfx::g_uniformBuffer.id,
+      .binding = kExtraBlockBinding,
+      .offset = 0,
+      .size = static_cast<uint32_t>(ExtraUniformBindingSize),
+      .dynamic = true,
   };
-  const wgpu::BindGroupDescriptor desc{
-      .layout = g_uniformBindGroupLayout,
-      .entryCount = entries.size(),
-      .entries = entries.data(),
-  };
-  return gfx::bind_group_ref(desc);
+  set.bufferCount = 1;
+  return gfx::bind_group_ref(set);
 }
 
-wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
+gl::Pipeline create_pipeline(const PipelineConfig& config) {
   ZoneScoped;
   const auto kind = static_cast<PipelineKind>(config.kind);
   const auto vertexLayoutKind = static_cast<VertexLayoutKind>(config.vertexLayout);
-  const auto colorFormat = static_cast<wgpu::TextureFormat>(config.colorFormat);
-  const auto stencilFormat = static_cast<wgpu::TextureFormat>(config.stencilFormat);
   const auto stencilMode = static_cast<StencilMode>(config.stencilMode);
   const auto blendMode = static_cast<BlendMode>(config.blendMode);
 
-  const auto vertexShader = compile_shader(vertex_source(vertexLayoutKind), "RmlUi Vertex Shader");
-  const auto fragmentShader = compile_shader(fragment_source(kind), "RmlUi Fragment Shader");
+  const std::string label = fmt::format("RmlUi Pipeline kind {} vtx {}", config.kind, config.vertexLayout);
+  const gl::GLuint program = compile_rml_program(vertexLayoutKind, kind, label.c_str());
 
-  constexpr std::array vertexAttributes{
-      wgpu::VertexAttribute{
-          .format = wgpu::VertexFormat::Float32x2,
-          .offset = offsetof(Rml::Vertex, position),
-          .shaderLocation = 0,
-      },
-      wgpu::VertexAttribute{
-          .format = wgpu::VertexFormat::Float32x2,
-          .offset = offsetof(Rml::Vertex, tex_coord),
-          .shaderLocation = 1,
-      },
-      wgpu::VertexAttribute{
-          .format = wgpu::VertexFormat::Unorm8x4,
-          .offset = offsetof(Rml::Vertex, colour),
-          .shaderLocation = 2,
-      },
-  };
-  const std::array vertexBufferLayouts{
-      wgpu::VertexBufferLayout{
-          .stepMode = wgpu::VertexStepMode::Vertex,
-          .arrayStride = sizeof(Rml::Vertex),
-          .attributeCount = vertexAttributes.size(),
-          .attributes = vertexAttributes.data(),
-      },
-  };
+  // Bake the fixed-function state from the backend-agnostic config. Blend and stencil
+  // config survive the cutover; the colour/stencil formats and MSAA sample count are
+  // resolved by the render-target/FBO setup, not the pipeline, on GL.
+  gl::BakedState state{};
+  if (blendMode == BlendMode::Premultiplied) {
+    state.blendEnabled = true;
+    state.colorOp = gl::BlendOperation::Add;
+    state.colorSrc = gl::BlendFactor::One;
+    state.colorDst = gl::BlendFactor::OneMinusSrcAlpha;
+    state.alphaOp = gl::BlendOperation::Add;
+    state.alphaSrc = gl::BlendFactor::One;
+    state.alphaDst = gl::BlendFactor::OneMinusSrcAlpha;
+  }
+  state.writeMask = static_cast<gl::ColorWriteMask>(config.colorWriteMask);
+  state.topology = gl::PrimitiveTopology::TriangleList;
+  state.frontFace = gl::FrontFace::CW;
+  state.cull = gl::CullMode::None;
+  // Combined depth-stencil format: the depth aspect is present but unused, so depth
+  // writes are off and the depth test always passes (matches the clip-mask passes).
+  state.depthTest = false;
+  state.depthWrite = false;
+  state.depthCompare = gl::CompareFunction::Always;
 
-  const auto blend = blend_state(blendMode);
-  const wgpu::ColorTargetState colorState{
-      .format = colorFormat,
-      .blend = blendMode == BlendMode::None ? nullptr : &blend,
-      .writeMask = static_cast<wgpu::ColorWriteMask>(config.colorWriteMask),
-  };
-  const wgpu::FragmentState fragmentState{
-      .module = fragmentShader.module,
-      .entryPoint = fragmentShader.entryPoint,
-      .targetCount = 1,
-      .targets = &colorState,
-  };
-
-  wgpu::DepthStencilState depthStencilState{};
-  const wgpu::DepthStencilState* depthStencil = nullptr;
   if (stencilMode != StencilMode::None) {
-    wgpu::CompareFunction compare = wgpu::CompareFunction::Always;
-    wgpu::StencilOperation passOp = wgpu::StencilOperation::Keep;
+    state.stencilTest = true;
+    // failOp / depthFailOp are always Keep; only the compare and passOp vary by mode,
+    // mirroring the WebGPU StencilFaceState the Dawn path used.
+    state.stencilFail = gl::GL_KEEP;
+    state.stencilDepthFail = gl::GL_KEEP;
     switch (stencilMode) {
     case StencilMode::EqualKeep:
-      compare = wgpu::CompareFunction::Equal;
-      break;
-    case StencilMode::ClipReplace:
-      passOp = wgpu::StencilOperation::Replace;
+      state.stencilCompare = gl::CompareFunction::Equal;
+      state.stencilPass = gl::GL_KEEP;
       break;
     case StencilMode::ClipIntersect:
-      compare = wgpu::CompareFunction::Equal;
-      passOp = wgpu::StencilOperation::IncrementClamp;
+      state.stencilCompare = gl::CompareFunction::Equal;
+      state.stencilPass = gl::GL_INCR; // IncrementClamp
+      break;
+    case StencilMode::ClipReplace:
+      state.stencilCompare = gl::CompareFunction::Always;
+      state.stencilPass = gl::GL_REPLACE;
       break;
     case StencilMode::AlwaysKeep:
     case StencilMode::None:
     default:
+      state.stencilCompare = gl::CompareFunction::Always;
+      state.stencilPass = gl::GL_KEEP;
       break;
     }
-    const wgpu::StencilFaceState face{
-        .compare = compare,
-        .failOp = wgpu::StencilOperation::Keep,
-        .depthFailOp = wgpu::StencilOperation::Keep,
-        .passOp = passOp,
-    };
-    depthStencilState = {
-        .format = stencilFormat,
-        .stencilFront = face,
-        .stencilBack = face,
-        .stencilReadMask = 0xFF,
-        .stencilWriteMask = 0xFF,
-    };
-    depthStencil = &depthStencilState;
+    state.stencilReadMask = 0xFF;
+    state.stencilWriteMask = 0xFF;
   }
 
-  const bool hasVertexBuffer = vertexLayoutKind == VertexLayoutKind::Geometry;
-  const auto pipelineLayout = create_pipeline_layout(kind);
-  const auto label = fmt::format("RmlUi Pipeline {}", config.kind);
-  const wgpu::RenderPipelineDescriptor pipelineDesc{
-      .label = label.c_str(),
-      .layout = pipelineLayout,
-      .vertex =
-          {
-              .module = vertexShader.module,
-              .entryPoint = vertexShader.entryPoint,
-              .bufferCount = hasVertexBuffer ? vertexBufferLayouts.size() : 0,
-              .buffers = hasVertexBuffer ? vertexBufferLayouts.data() : nullptr,
-          },
-      .primitive =
-          {
-              .topology = wgpu::PrimitiveTopology::TriangleList,
-              .stripIndexFormat = wgpu::IndexFormat::Undefined,
-              .frontFace = wgpu::FrontFace::CW,
-              .cullMode = wgpu::CullMode::None,
-          },
-      .depthStencil = depthStencil,
-      .multisample =
-          {
-              .count = config.sampleCount,
-          },
-      .fragment = &fragmentState,
-  };
-  return webgpu::g_device.CreateRenderPipeline(&pipelineDesc);
+  gl::Pipeline pipeline{};
+  pipeline.program = program;
+  pipeline.state = state;
+  // Geometry draws feed an interleaved Rml::Vertex buffer (its own VAO); fullscreen and
+  // blur pipelines are attribute-less (gl_VertexID), so they use vertexLayout 0.
+  pipeline.vertexLayout =
+      vertexLayoutKind == VertexLayoutKind::Geometry ? gl::kRmlGeometryVertexLayout : 0u;
+  return pipeline;
 }
 
-void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+void render(const DrawData& data, gl::PassEncoder& pass) {
+  // bind_pipeline early-outs on a missing/empty (program 0) pipeline.
   if (!gfx::bind_pipeline(data.pipeline, pass)) {
     return;
   }
 
-  const auto commonBindGroup = gfx::find_bind_group(common_bind_group_ref());
+  const auto& commonBindGroup = gfx::find_bind_group(common_bind_group_ref());
   const std::array commonOffsets{data.uniformRange.offset};
   pass.SetBindGroup(0, commonBindGroup, commonOffsets.size(), commonOffsets.data());
 
   if (data.bindGroup1 != 0) {
-    const auto bindGroup = gfx::find_bind_group(data.bindGroup1);
+    const auto& bindGroup = gfx::find_bind_group(data.bindGroup1);
     if ((data.dynamicBindGroupMask & DynamicGroup1) != 0) {
       const std::array offsets{data.bindGroup1DynamicOffset};
       pass.SetBindGroup(1, bindGroup, offsets.size(), offsets.data());
@@ -979,7 +664,7 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   }
 
   if (data.bindGroup2 != 0) {
-    const auto bindGroup = gfx::find_bind_group(data.bindGroup2);
+    const auto& bindGroup = gfx::find_bind_group(data.bindGroup2);
     if ((data.dynamicBindGroupMask & DynamicGroup2) != 0) {
       const std::array offsets{data.bindGroup2DynamicOffset};
       pass.SetBindGroup(2, bindGroup, offsets.size(), offsets.data());
@@ -989,15 +674,14 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   }
 
   if (data.hasBlendConstant != 0) {
-    const wgpu::Color color{data.blendConstant[0], data.blendConstant[1], data.blendConstant[2], data.blendConstant[3]};
+    const gl::Color color{data.blendConstant[0], data.blendConstant[1], data.blendConstant[2], data.blendConstant[3]};
     pass.SetBlendConstant(&color);
   }
   pass.SetStencilReference(data.stencilRef);
 
   if (static_cast<DrawKind>(data.drawKind) == DrawKind::Geometry) {
-    auto& resources = gfx::detail::resources();
-    pass.SetVertexBuffer(0, resources.vertexBuffer, data.vertexRange.offset, data.vertexRange.size);
-    pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint32, data.indexRange.offset, data.indexRange.size);
+    pass.SetVertexBuffer(0, gfx::g_vertexBuffer, data.vertexRange.offset, data.vertexRange.size);
+    pass.SetIndexBuffer(gfx::g_indexBuffer, gl::IndexFormat::Uint32, data.indexRange.offset, data.indexRange.size);
     pass.DrawIndexed(data.indexCount);
   } else {
     pass.Draw(data.vertexCount);

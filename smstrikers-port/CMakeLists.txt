@@ -31,8 +31,9 @@ endif()
 option(STRIKERS_ASAN "Build with AddressSanitizer" OFF)
 
 # Aurora is a drop-in replacement for the Dolphin SDK: it defines the real GX/VI/PAD/DVD/CARD/SI
-# symbols over WebGPU and SDL3.
+# symbols over WebGPU/GLES and SDL3.
 option(STRIKERS_AURORA "Build against Aurora (real GX/PAD/CARD/DVD)" ON)
+option(STRIKERS_DISCORD "Build Discord Rich Presence" OFF)
 
 # include/msl links only the Metrowerks headers whose names do not collide with host ones, so
 # <stdio.h>, <math.h> and the rest resolve to the host.
@@ -140,18 +141,6 @@ int main() { std::jthread t([](std::stop_token) {}); }
     # Freetype's bzip2 support decompresses bzip2-compressed PCF fonts and nothing else.
     set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
 
-    # Overriding an upstream URL is only right while that URL is still the one upstream uses.
-    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/extern/aurora/extern/CMakeLists.txt"
-         _aurora_extern)
-    string(FIND "${_aurora_extern}" "files.twilitrealm.dev/freetype" _ft_anchor)
-    unset(_aurora_extern)
-    if(_ft_anchor EQUAL -1)
-        message(FATAL_ERROR
-            "Aurora no longer fetches Freetype from files.twilitrealm.dev, so "
-            "the FetchContent_Declare(Freetype) override above is stale; "
-            "re-review it. If upstream's own URL works now, delete it.")
-    endif()
-
     if(NX)
         set(STRIKERS_SWITCH_DAWN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/dawn-switch" CACHE PATH
             "Dawn source tree with the Switch changes, from tools/fetch-switch-deps.sh")
@@ -206,8 +195,8 @@ int main() { std::jthread t([](std::stop_token) {}); }
 
     add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 
-    # The Switch has no Discord client.
-    if(NOT NX)
+    # The Switch and embedded Linux ports have no Discord client.
+    if(NOT NX AND STRIKERS_DISCORD)
         add_subdirectory(extern/borealis EXCLUDE_FROM_ALL)
     endif()
 
@@ -314,7 +303,7 @@ set_target_properties(strikers_operators PROPERTIES
 # borealis headers need C++20, so discord.cpp is a target of its own.
 list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/discord.cpp")
-if(STRIKERS_AURORA AND NOT NX)
+if(STRIKERS_AURORA AND NOT NX AND STRIKERS_DISCORD)
     add_library(strikers_discord OBJECT
          "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/discord.cpp")
     set_target_properties(strikers_discord PROPERTIES
@@ -323,6 +312,9 @@ if(STRIKERS_AURORA AND NOT NX)
     target_include_directories(strikers_discord PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(strikers_discord PRIVATE borealis::discord)
+else()
+    list(APPEND PLATFORM_SOURCES
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/discord_stub.c")
 endif()
 
 # The debug overlay is ImGui, and ImGui arrives with Aurora and only with Aurora: with

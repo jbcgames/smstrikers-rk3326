@@ -12,29 +12,29 @@ static void port_missing(const char* name)
     abort();
 }
 
-long port_stub_0(void) __asm__("_GXPeekARGB");
+long port_stub_0(void) __asm__("GXPeekARGB");
 long port_stub_0(void) { return 0; }
-long port_stub_1(void) __asm__("_GXPokeARGB");
+long port_stub_1(void) __asm__("GXPokeARGB");
 long port_stub_1(void) { return 0; }
-long port_stub_2(void) __asm__("_GXPokeBlendMode");
+long port_stub_2(void) __asm__("GXPokeBlendMode");
 long port_stub_2(void) { return 0; }
-long port_stub_3(void) __asm__("_GXPokeColorUpdate");
+long port_stub_3(void) __asm__("GXPokeColorUpdate");
 long port_stub_3(void) { return 0; }
-void port_stub_4(void) __asm__("__Z9dSolveLCPiPfS_S_S_iS_S_Pi");
-void port_stub_4(void) { port_missing("__Z9dSolveLCPiPfS_S_S_iS_S_Pi"); }
-void port_stub_5(void) __asm__("__ZN13StatsGatherer14DoFunctionCallEj");
-void port_stub_5(void) { port_missing("__ZN13StatsGatherer14DoFunctionCallEj"); }
-void port_stub_6(void) __asm__("__ZN13StatsGatherer3RunEf");
-void port_stub_6(void) { port_missing("__ZN13StatsGatherer3RunEf"); }
-void port_stub_7(void) __asm__("__ZN13StatsGatherer7GetNameEv");
-void port_stub_7(void) { port_missing("__ZN13StatsGatherer7GetNameEv"); }
-void port_stub_8(void) __asm__("__ZN16TMAnimControllerC1EPKcP5World");
-void port_stub_8(void) { port_missing("__ZN16TMAnimControllerC1EPKcP5World"); }
-void port_stub_9(void) __asm__("__ZN21SkinnedAnimController16CreateGLSkinMeshEP7glModel");
-void port_stub_9(void) { port_missing("__ZN21SkinnedAnimController16CreateGLSkinMeshEP7glModel"); }
-void port_stub_10(void) __asm__("__ZN21SkinnedAnimControllerC1EPKcP5World");
-void port_stub_10(void) { port_missing("__ZN21SkinnedAnimControllerC1EPKcP5World"); }
-void port_stub_11(void) __asm__("__ZThn72_N13StatsGatherer3RunEf");
-void port_stub_11(void) { port_missing("__ZThn72_N13StatsGatherer3RunEf"); }
-void port_stub_12(void) __asm__("__ZThn72_N13StatsGatherer7GetNameEv");
-void port_stub_12(void) { port_missing("__ZThn72_N13StatsGatherer7GetNameEv"); }
+void port_stub_4(void) __asm__("_Z9dSolveLCPiPfS_S_S_iS_S_Pi");
+void port_stub_4(void) { port_missing("_Z9dSolveLCPiPfS_S_S_iS_S_Pi"); }
+void port_stub_5(void) __asm__("_ZN13StatsGatherer14DoFunctionCallEj");
+void port_stub_5(void) { port_missing("_ZN13StatsGatherer14DoFunctionCallEj"); }
+void port_stub_6(void) __asm__("_ZN13StatsGatherer3RunEf");
+void port_stub_6(void) { port_missing("_ZN13StatsGatherer3RunEf"); }
+void port_stub_7(void) __asm__("_ZN13StatsGatherer7GetNameEv");
+void port_stub_7(void) { port_missing("_ZN13StatsGatherer7GetNameEv"); }
+void port_stub_8(void) __asm__("_ZN16TMAnimControllerC1EPKcP5World");
+void port_stub_8(void) { port_missing("_ZN16TMAnimControllerC1EPKcP5World"); }
+void port_stub_9(void) __asm__("_ZN21SkinnedAnimController16CreateGLSkinMeshEP7glModel");
+void port_stub_9(void) { port_missing("_ZN21SkinnedAnimController16CreateGLSkinMeshEP7glModel"); }
+void port_stub_10(void) __asm__("_ZN21SkinnedAnimControllerC1EPKcP5World");
+void port_stub_10(void) { port_missing("_ZN21SkinnedAnimControllerC1EPKcP5World"); }
+void port_stub_11(void) __asm__("_ZThn72_N13StatsGatherer3RunEf");
+void port_stub_11(void) { port_missing("_ZThn72_N13StatsGatherer3RunEf"); }
+void port_stub_12(void) __asm__("_ZThn72_N13StatsGatherer7GetNameEv");
+void port_stub_12(void) { port_missing("_ZThn72_N13StatsGatherer7GetNameEv"); }

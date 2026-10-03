@@ -1,10 +1,10 @@
 #include "png_io.hpp"
 
-#include "../io.hpp"
-#include "png.h"
-
 #include <cstring>
-#include <vector>
+
+#include "dds_io.hpp"
+#include "png.h"
+#include "../fs_helper.hpp"
 
 static aurora::Module Log("aurora::gfx::png");
 
@@ -81,11 +81,6 @@ std::optional<ConvertedTexture> parse_png_bytes(ArrayRef<uint8_t> bytes) noexcep
   rowPointers.resize(height);
 
   imageData.append_zeroes(rowBytes * height);
-  // smstrikers-port: the allocation can fail on the Switch, where a large texture pack fills the heap.
-  if (imageData.data() == nullptr) {
-    Log.error("out of memory for a {}x{} PNG", width, height);
-    return std::nullopt;
-  }
 
   for (i = 0; i < height; i++) {
     rowPointers[i] = imageData.data() + i * rowBytes;
@@ -95,7 +90,7 @@ std::optional<ConvertedTexture> parse_png_bytes(ArrayRef<uint8_t> bytes) noexcep
   png_read_end(structs.pStruct, nullptr);
 
   return ConvertedTexture{
-    .format = wgpu::TextureFormat::RGBA8Unorm,
+    .format = gl::TextureFormat::RGBA8Unorm,
     .width = width,
     .height = height,
     .mips = 1,
@@ -103,49 +98,11 @@ std::optional<ConvertedTexture> parse_png_bytes(ArrayRef<uint8_t> bytes) noexcep
   };
 }
 
-static void writePngData(png_structp png, png_bytep data, const size_t length) {
-  auto* out = static_cast<std::vector<uint8_t>*>(png_get_io_ptr(png));
-  out->insert(out->end(), data, data + length);
-}
-
-static void flushPngData(png_structp) {}
-
-bool write_rgba8_png(const std::filesystem::path& path, uint32_t width, uint32_t height,
-                     ArrayRef<uint8_t> pixels) noexcept {
-  if (width == 0 || height == 0 || pixels.size() != static_cast<size_t>(width) * height * 4) {
-    return false;
-  }
-  png_structp pStruct = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-  png_infop pInfo = pStruct != nullptr ? png_create_info_struct(pStruct) : nullptr;
-  if (pInfo == nullptr) {
-    png_destroy_write_struct(&pStruct, nullptr);
-    return false;
-  }
-
-  std::vector<uint8_t> encoded;
-  std::vector<png_bytep> rows(height);
-  for (uint32_t y = 0; y < height; ++y) {
-    rows[y] = const_cast<png_bytep>(pixels.data()) + static_cast<size_t>(y) * width * 4;
-  }
-  if (setjmp(png_jmpbuf(pStruct))) {
-    png_destroy_write_struct(&pStruct, &pInfo);
-    return false;
-  }
-  png_set_write_fn(pStruct, &encoded, writePngData, flushPngData);
-  png_set_IHDR(pStruct, pInfo, width, height, 8, PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
-               PNG_FILTER_TYPE_DEFAULT);
-  png_write_info(pStruct, pInfo);
-  png_write_image(pStruct, rows.data());
-  png_write_end(pStruct, nullptr);
-  png_destroy_write_struct(&pStruct, &pInfo);
-  return io::write_file(path, {encoded.data(), encoded.size()});
-}
-
 std::optional<ConvertedTexture>
 load_png_file(const std::filesystem::path& path) noexcept {
-  const auto bytes = io::read_file(path);
+  const auto bytes = dds::read_binary_file(path);
   if (!bytes.has_value()) {
-    Log.error("failed to open file: {}", io::fs_path_to_string(path));
+    Log.error("failed to open file: {}", fs_path_to_string(path));
     return std::nullopt;
   }
   return parse_png_bytes(*bytes);

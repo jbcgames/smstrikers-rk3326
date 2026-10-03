@@ -1,4 +1,5 @@
 #include <aurora/dvd.h>
+#include <dolphin/ai.h>
 #include <dolphin/dvd.h>
 
 #include <algorithm>
@@ -92,7 +93,52 @@ public:
 
 CommandDataNod* s_disc;
 
+struct PendingCallback {
+  s32 result;
+  DVDCommandBlock* block;
+  DVDCBCallback callback;
+};
+
+std::mutex s_pendingCallbackMutex;
+std::deque<PendingCallback> s_pendingCallbacks;
+thread_local bool s_processingPendingCallbacks = false;
+
+void enqueuePendingCallback(s32 result, DVDCommandBlock* block, DVDCBCallback callback) {
+  if (callback == nullptr) {
+    return;
+  }
+  std::lock_guard lock{s_pendingCallbackMutex};
+  s_pendingCallbacks.push_back({result, block, callback});
+}
+
+void processPendingCallbacks() {
+  if (s_processingPendingCallbacks) {
+    return;
+  }
+
+  s_processingPendingCallbacks = true;
+  while (true) {
+    PendingCallback pending{};
+    {
+      std::lock_guard lock{s_pendingCallbackMutex};
+      if (s_pendingCallbacks.empty()) {
+        break;
+      }
+      pending = s_pendingCallbacks.front();
+      s_pendingCallbacks.pop_front();
+    }
+    pending.callback(pending.result, pending.block);
+  }
+  s_processingPendingCallbacks = false;
+}
+
+void clearPendingCallbacks() {
+  std::lock_guard lock{s_pendingCallbackMutex};
+  s_pendingCallbacks.clear();
+}
+
 void clearState() {
+  clearPendingCallbacks();
   if (s_partition != nullptr) {
     nod_free(s_partition);
     s_partition = nullptr;
@@ -507,7 +553,7 @@ private:
       m_activeBlock = block;
       atomic_store_release(block->state, DVD_STATE_BUSY);
       lk.unlock();
-      process_command(block);
+      process_command(block, true);
       lk.lock();
       m_activeBlock = nullptr;
       if (m_cancelActiveBlock == block) {
@@ -533,15 +579,18 @@ private:
     return {result, transferred};
   }
 
-  void process_command(DVDCommandBlock* block) {
+  void process_command(DVDCommandBlock* block, bool deferCallback) {
     auto [result, transferred] = perform_command(block);
     if (consume_active_cancel(block)) {
       result = DVD_RESULT_CANCELED;
       transferred = 0;
     }
+    const DVDCBCallback callback = block->callback;
     finishCommand(block, result, transferred);
-    if (block->callback != nullptr) {
-      block->callback(result, block);
+    if (deferCallback) {
+      enqueuePendingCallback(result, block, callback);
+    } else if (callback != nullptr) {
+      callback(result, block);
     }
   }
 
@@ -551,7 +600,7 @@ private:
       m_activeBlock = block;
       atomic_store_release(block->state, DVD_STATE_BUSY);
     }
-    process_command(block);
+    process_command(block, false);
     {
       std::lock_guard lk{m_mutex};
       m_activeBlock = nullptr;
@@ -646,6 +695,10 @@ void cbForPrepareStreamAsync(s32 result, DVDCommandBlock* block) {
 } // namespace
 
 extern "C" {
+
+void aurora_dvd_process_callbacks(void) {
+  processPendingCallbacks();
+}
 
 bool aurora_dvd_open(const char* disc_path) {
   if (disc_path == nullptr) {
@@ -846,12 +899,12 @@ int DVDGetStreamPlayAddrAsync(DVDCommandBlock* block, DVDCBCallback callback) {
   if (block == nullptr || !isCommandBlockIdle(block)) {
     return FALSE;
   }
-  return completeImmediateCommand(block, DVD_COMMAND_REQUEST_PLAY_ADDR, DVD_RESULT_IGNORED, 0, callback);
+  return completeImmediateCommand(block, DVD_COMMAND_REQUEST_PLAY_ADDR, AIGetStreamPlayState(), 0, callback);
 }
 
 s32 DVDGetStreamPlayAddr(DVDCommandBlock* block) {
   (void)block;
-  return 0;
+  return AIGetStreamPlayState();
 }
 
 int DVDGetStreamStartAddrAsync(DVDCommandBlock* block, DVDCBCallback callback) {
@@ -943,7 +996,10 @@ s32 DVDGetCommandBlockStatus(const DVDCommandBlock* block) {
   return atomic_load_acquire(block->state);
 }
 
-s32 DVDGetDriveStatus(void) { return s_initialized ? DVD_STATE_END : DVD_STATE_NO_DISK; }
+s32 DVDGetDriveStatus(void) {
+  processPendingCallbacks();
+  return s_initialized ? DVD_STATE_END : DVD_STATE_NO_DISK;
+}
 
 BOOL DVDSetAutoInvalidation(BOOL autoInval) {
   BOOL prev = s_autoInvalidation;
@@ -1163,7 +1219,7 @@ BOOL DVDReadAsyncPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset,
                 "DVDReadAsync(): specified area is out of the file  ");
 
   fileInfo->callback = callback;
-  DVDReadAbsAsyncPrio(&fileInfo->cb, addr, length, offset, cbForReadAsync, prio);
+  DVDReadAbsAsyncPrio(&fileInfo->cb, addr, length, offset, callback != nullptr ? cbForReadAsync : nullptr, prio);
   return TRUE;
 }
 
@@ -1172,6 +1228,7 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
     return DVD_RESULT_FATAL_ERROR;
   }
   s_worker.wait(&fileInfo->cb);
+  processPendingCallbacks();
   const s32 state = atomic_load_acquire(fileInfo->cb.state);
   if (state == DVD_STATE_END) {
     return static_cast<s32>(atomic_load_relaxed(fileInfo->cb.transferredSize));
@@ -1190,7 +1247,7 @@ int DVDSeekAsyncPrio(DVDFileInfo* fileInfo, s32 offset, void (*callback)(s32, DV
                 "DVDSeek(): offset is out of the file  ");
 
   fileInfo->callback = callback;
-  DVDSeekAbsAsyncPrio(&fileInfo->cb, offset, cbForSeekAsync, prio);
+  DVDSeekAbsAsyncPrio(&fileInfo->cb, offset, callback != nullptr ? cbForSeekAsync : nullptr, prio);
   return 1;
 }
 
@@ -1199,6 +1256,7 @@ s32 DVDSeekPrio(DVDFileInfo* fileInfo, s32 offset, s32 prio) {
     return DVD_RESULT_FATAL_ERROR;
   }
   s_worker.wait(&fileInfo->cb);
+  processPendingCallbacks();
   const s32 state = atomic_load_acquire(fileInfo->cb.state);
   if (state == DVD_STATE_END) {
     return DVD_RESULT_GOOD;
@@ -1309,7 +1367,7 @@ BOOL DVDPrepareStreamAsync(DVDFileInfo* fileInfo, u32 length, u32 offset, DVDCal
               length);
   }
   fileInfo->callback = callback;
-  return DVDPrepareStreamAbsAsync(&fileInfo->cb, length, offset, cbForPrepareStreamAsync);
+  return DVDPrepareStreamAbsAsync(&fileInfo->cb, length, offset, callback != nullptr ? cbForPrepareStreamAsync : nullptr);
 }
 
 s32 DVDPrepareStream(DVDFileInfo* fileInfo, u32 length, u32 offset) {

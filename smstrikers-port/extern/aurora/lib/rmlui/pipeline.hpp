@@ -1,16 +1,14 @@
 #pragma once
 
-#include "../gfx/types.hpp"
+#include "../gfx/common.hpp"
 #include "WebGPURenderInterface.hpp"
 
 #include <array>
 #include <cstdint>
 
-#include <webgpu/webgpu_cpp.h>
-
 namespace aurora::rmlui {
 
-constexpr uint32_t RmlPipelineConfigVersion = 3;
+constexpr uint32_t RmlPipelineConfigVersion = 2;
 
 enum class PipelineKind : uint32_t {
   Geometry,
@@ -23,7 +21,6 @@ enum class PipelineKind : uint32_t {
   RegionBlit,
   DropShadow,
   MaskImage,
-  Glass,
 };
 
 enum class VertexLayoutKind : uint32_t {
@@ -53,13 +50,13 @@ enum class DrawKind : uint32_t {
 struct PipelineConfig {
   uint32_t version = RmlPipelineConfigVersion;
   uint32_t kind = static_cast<uint32_t>(PipelineKind::Geometry);
-  uint32_t colorFormat = static_cast<uint32_t>(wgpu::TextureFormat::Undefined);
+  uint32_t colorFormat = static_cast<uint32_t>(gl::TextureFormat::Undefined);
   uint32_t sampleCount = 1;
   uint32_t vertexLayout = static_cast<uint32_t>(VertexLayoutKind::Geometry);
-  uint32_t stencilFormat = static_cast<uint32_t>(wgpu::TextureFormat::Undefined);
+  uint32_t stencilFormat = static_cast<uint32_t>(gl::TextureFormat::Undefined);
   uint32_t stencilMode = static_cast<uint32_t>(StencilMode::None);
   uint32_t blendMode = static_cast<uint32_t>(BlendMode::Premultiplied);
-  uint32_t colorWriteMask = static_cast<uint32_t>(wgpu::ColorWriteMask::All);
+  uint32_t colorWriteMask = static_cast<uint32_t>(gl::ColorWriteMask::All);
 };
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 
@@ -92,12 +89,13 @@ static_assert(std::is_trivially_copyable_v<DrawData>);
 void initialize_pipeline();
 void shutdown_pipeline();
 
-gfx::BindGroupRef texture_bind_group_ref(const wgpu::TextureView& view);
+gfx::BindGroupRef texture_bind_group_ref(const gl::Texture& view);
+gfx::BindGroupRef mask_bind_group_ref(const gl::Texture& imageView, const gl::Texture& maskView);
 gfx::BindGroupRef common_bind_group_ref();
 gfx::BindGroupRef uniform_bind_group_ref();
 
-wgpu::RenderPipeline create_pipeline(const PipelineConfig& config);
-void render(const DrawData& data, const wgpu::RenderPassEncoder& pass);
+gl::Pipeline create_pipeline(const PipelineConfig& config);
+void render(const DrawData& data, gl::PassEncoder& pass);
 
 uint32_t sampler_mode() noexcept;
 

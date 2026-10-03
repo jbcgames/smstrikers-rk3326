@@ -1,12 +1,10 @@
-#include <cstring>
-#include <cstdlib>
-#include <chrono>
-#include "resources.hpp"
-#include "recording.hpp"
+#include "common.hpp"
 
 #include "../internal.hpp"
+#include "../gl/textures.hpp"
 #include "../webgpu/gpu.hpp"
 #include "aurora/aurora.h"
+#include "render_worker.hpp"
 #include "texture.hpp"
 #include "texture_convert.hpp"
 #include "../gx/gx_fmt.hpp"
@@ -14,117 +12,84 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
-#include <webgpu/webgpu_cpp.h>
 
 namespace aurora::gfx {
-using webgpu::g_device;
-using webgpu::g_queue;
 
 namespace {
-constexpr Module Log{"aurora::gfx"};
+Module Log("aurora::gfx");
 
-wgpu::Extent3D physical_size(wgpu::Extent3D size, TextureFormatInfo info) {
+gl::Extent3D physical_size(gl::Extent3D size, TextureFormatInfo info) {
   const uint32_t width = ((size.width + info.blockWidth - 1) / info.blockWidth) * info.blockWidth;
   const uint32_t height = ((size.height + info.blockHeight - 1) / info.blockHeight) * info.blockHeight;
   return {.width = width, .height = height, .depthOrArrayLayers = size.depthOrArrayLayers};
 }
-
-bool setup_swizzle(wgpu::TextureComponentSwizzleDescriptor& swizzle, u32 format) noexcept {
-  if (!webgpu::g_textureComponentSwizzleSupported) {
-    return false;
-  }
-
-  switch (format) {
-  case GX_TF_R8_PC:
-    swizzle.swizzle.r = wgpu::ComponentSwizzle::R;
-    swizzle.swizzle.g = wgpu::ComponentSwizzle::R;
-    swizzle.swizzle.b = wgpu::ComponentSwizzle::R;
-    swizzle.swizzle.a = wgpu::ComponentSwizzle::R;
-    return true;
-  case GX_TF_RG8_PC:
-    swizzle.swizzle.r = wgpu::ComponentSwizzle::R;
-    swizzle.swizzle.g = wgpu::ComponentSwizzle::R;
-    swizzle.swizzle.b = wgpu::ComponentSwizzle::R;
-    swizzle.swizzle.a = wgpu::ComponentSwizzle::G;
-    return true;
-  default:
-    return false;
-  }
-}
-
-wgpu::AddressMode wgpu_address_mode(GXTexWrapMode mode) {
-  switch (mode) {
-    DEFAULT_FATAL("invalid wrap mode {}", underlying(mode));
-  case GX_CLAMP:
-    return wgpu::AddressMode::ClampToEdge;
-  case GX_REPEAT:
-    return wgpu::AddressMode::Repeat;
-  case GX_MIRROR:
-    return wgpu::AddressMode::MirrorRepeat;
-  }
-}
-
-std::pair<wgpu::FilterMode, wgpu::MipmapFilterMode> wgpu_filter_mode(GXTexFilter filter) {
-  switch (filter) {
-    DEFAULT_FATAL("invalid filter mode {}", static_cast<int>(filter));
-  case GX_NEAR:
-    return {wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Undefined};
-  case GX_LINEAR:
-    return {wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Undefined};
-  case GX_NEAR_MIP_NEAR:
-    return {wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest};
-  case GX_LIN_MIP_NEAR:
-    return {wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Nearest};
-  case GX_NEAR_MIP_LIN:
-    return {wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Linear};
-  case GX_LIN_MIP_LIN:
-    return {wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear};
-  }
-}
-
-u16 wgpu_aniso(GXAnisotropy aniso) {
-  switch (aniso) {
-    DEFAULT_FATAL("invalid aniso {}", static_cast<int>(aniso));
-  case GX_ANISO_1:
-  case GX_MAX_ANISOTROPY:
-    return 1;
-  case GX_ANISO_2:
-    return std::max<u16>(webgpu::g_graphicsConfig.textureAnisotropy / 2, 1);
-  case GX_ANISO_4:
-    return std::max<u16>(webgpu::g_graphicsConfig.textureAnisotropy, 1);
-  }
-}
 } // namespace
 
-TexLoadTiming g_texLoadTiming;
+namespace {
+std::mutex s_deferredDestroyMutex;
+std::vector<gl::Texture> s_deferredDestroys;
+} // namespace
 
-bool tex_log_enabled() noexcept {
-  static const bool s_enabled = [] {
-    const char* e = std::getenv("AURORA_TEX_LOG");
-    return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
-  }();
-  return s_enabled;
+TextureRef::~TextureRef() {
+  if (texture.id == 0) {
+    return;
+  }
+  // Deleting here (or even enqueue_work-ing the delete) is a use-after-free: recorded
+  // draw commands hold the raw GL id (gx build_bind_groups), and the worker queue is
+  // FIFO -- a delete enqueued mid-record lands AHEAD of the pass items that use the
+  // id (passes enqueue at record end), so the worker deletes the texture and then
+  // executes the draw against a dead name -> incomplete texture -> opaque black
+  // squares (the sky/minimap bug; textures rebuilt every frame hit it every frame).
+  // Defer instead: end_frame() moves the accumulated list into the frame's
+  // end-of-frame worker item, which runs after every pass that could reference the
+  // id. Entries left over at gfx::shutdown are dropped without GL calls (the context
+  // dies with the worker).
+  defer_texture_destroy(texture);
 }
 
-uint64_t tex_log_now_ns() noexcept {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+void defer_texture_destroy(const gl::Texture& texture) noexcept {
+  std::lock_guard lock{s_deferredDestroyMutex};
+  s_deferredDestroys.push_back(texture);
 }
 
-static TextureHandle create_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
-                                       wgpu::TextureFormat wgpuFormat, const char* label) noexcept;
+std::vector<gl::Texture> take_deferred_texture_destroys() noexcept {
+  std::lock_guard lock{s_deferredDestroyMutex};
+  return std::exchange(s_deferredDestroys, {});
+}
 
-// smstrikers-port: the upload half of new_static_texture_2d, shared with new_static_texture_2d_converted.
-static void queue_static_texture_upload(TextureRef& ref, uint32_t mips, ArrayRef<uint8_t> data, const char* label,
-                                        bool timing, uint64_t t0) noexcept {
+TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
+                                    bool tlut, const char* label) noexcept {
+  ZoneScoped;
+
+  auto handle = new_dynamic_texture_2d(width, height, mips, format, label);
+  auto& ref = *handle;
+
+  ConvertedTexture converted;
+  if (ref.gxFormat != InvalidTextureFormat) {
+    if (tlut) {
+      CHECK(ref.size.height == 1, "new_static_texture_2d[{}]: expected tlut height 1, got {}", label, ref.size.height);
+      CHECK(ref.mipCount == 1, "new_static_texture_2d[{}]: expected tlut mipCount 1, got {}", label, ref.mipCount);
+      converted = convert_tlut(ref.gxFormat, ref.size.width, data);
+    } else {
+      converted = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
+    }
+    if (!converted.data.empty()) {
+      data = converted.data;
+      ref.hasArbitraryMips = converted.hasArbitraryMips;
+    }
+  }
+
   uint32_t offset = 0;
-  for (uint32_t mip = 0; mip < mips; ++mip) {
-    const wgpu::Extent3D mipSize{
+  // Use ref.mipCount (already clamped in new_dynamic_texture_2d), not the raw mips
+  // argument — otherwise we'd write past the texture's actual mip levels.
+  for (uint32_t mip = 0; mip < ref.mipCount; ++mip) {
+    const gl::Extent3D mipSize{
         .width = std::max(ref.size.width >> mip, 1u),
         .height = std::max(ref.size.height >> mip, 1u),
         .depthOrArrayLayers = ref.size.depthOrArrayLayers,
@@ -137,199 +102,99 @@ static void queue_static_texture_upload(TextureRef& ref, uint32_t mips, ArrayRef
     const uint32_t dataSize = bytesPerRow * heightBlocks * mipSize.depthOrArrayLayers;
     CHECK(offset + dataSize <= data.size(), "new_static_texture_2d[{}]: expected at least {} bytes, got {}", label,
           offset + dataSize, data.size());
-    const wgpu::TexelCopyTextureInfo dstView{
-        .texture = ref.texture,
-        .mipLevel = mip,
-    };
-    if constexpr (UseTextureBuffer) {
-      queue_texture_upload_data(data.data() + offset, bytesPerRow, heightBlocks, std::move(dstView), physicalSize);
-    } else {
-      const wgpu::TexelCopyBufferLayout dataLayout{
-          .bytesPerRow = bytesPerRow,
-          .rowsPerImage = heightBlocks,
-      };
-      g_queue.WriteTexture(&dstView, data.data() + offset, dataSize, &dataLayout, &physicalSize);
-    }
+    // Uploads route to the render worker (glTexSubImage2D at the op slot); the
+    // WebGPU staging-buffer + queue.WriteTexture path is gone (plan Phase 2). The
+    // recording thread just records {ptr, tex, layout}.
+    queue_texture_upload_data(data.data() + offset, bytesPerRow, heightBlocks, ref.texture, gl::Origin3D{}, physicalSize,
+                              mip);
     offset += dataSize;
   }
   if (data.size() != UINT32_MAX && offset < data.size()) {
     Log.warn("new_static_texture_2d[{}]: texture used {} bytes, but given {} bytes", label, offset, data.size());
   }
-  if (timing) {
-    g_texLoadTiming.queueNs += tex_log_now_ns() - t0;
-    ++g_texLoadTiming.textures;
-    g_texLoadTiming.bytes += offset;
-  }
-}
-
-TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,
-                                    bool tlut, const char* label) noexcept {
-  ZoneScoped;
-
-  const bool timing = tex_log_enabled();
-  uint64_t t0 = timing ? tex_log_now_ns() : 0;
-  ConvertedTexture converted{};
-  if (format != InvalidTextureFormat) {
-    if (tlut) {
-      CHECK(height == 1, "new_static_texture_2d[{}]: expected tlut height 1, got {}", label, height);
-      CHECK(mips == 1, "new_static_texture_2d[{}]: expected tlut mipCount 1, got {}", label, mips);
-      converted = convert_tlut(format, width, data);
-    } else {
-      converted = convert_texture(format, width, height, mips, data);
-    }
-    if (!converted.data.empty()) {
-      data = converted.data;
-    }
-  }
-  if (timing) {
-    const uint64_t t = tex_log_now_ns();
-    g_texLoadTiming.convertNs += t - t0;
-    t0 = t;
-  }
-
-  const auto wgpuFormat = converted.format != wgpu::TextureFormat::Undefined ? converted.format : to_wgpu(format);
-  auto handle = create_texture_2d(width, height, mips, format, wgpuFormat, label);
-  auto& ref = *handle;
-  ref.hasArbitraryMips = converted.hasArbitraryMips;
-  if (timing) {
-    const uint64_t t = tex_log_now_ns();
-    g_texLoadTiming.createNs += t - t0;
-    t0 = t;
-  }
-
-  queue_static_texture_upload(ref, mips, data, label, timing, t0);
-  return handle;
-}
-
-TextureHandle new_static_texture_2d_converted(uint32_t width, uint32_t height, uint32_t mips, u32 format,
-                                              wgpu::TextureFormat wgpuFormat, ArrayRef<uint8_t> converted,
-                                              bool hasArbitraryMips, const char* label) noexcept {
-  ZoneScoped;
-  const bool timing = tex_log_enabled();
-  uint64_t t0 = timing ? tex_log_now_ns() : 0;
-  auto handle = create_texture_2d(width, height, mips, format, wgpuFormat, label);
-  auto& ref = *handle;
-  ref.hasArbitraryMips = hasArbitraryMips;
-  if (timing) {
-    const uint64_t t = tex_log_now_ns();
-    g_texLoadTiming.createNs += t - t0;
-    t0 = t;
-    ++g_texLoadTiming.preconverted;
-  }
-  queue_static_texture_upload(ref, mips, converted, label, timing, t0);
   return handle;
 }
 
 TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
                                      const char* label) noexcept {
   ZoneScopedS(3);
-  return create_texture_2d(width, height, mips, gxFormat, to_wgpu(gxFormat), label);
-}
-
-// smstrikers-port: takes the GPU format, since CMPR content decides between BC1 and RGBA8.
-static TextureHandle create_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
-                                       wgpu::TextureFormat wgpuFormat, const char* label) noexcept {
-  const wgpu::Extent3D size{
+  // A zero-sized texture makes Mali's glTexStorage2D fail with GL_INVALID_VALUE and lose
+  // the device (desktop Mesa tolerates it). GX can request 0-dim copies/targets when a
+  // subsystem is scaled to nothing (e.g. shadows under shadowResolutionMultiplier=0), so
+  // clamp to at least 1x1 — the texture is valid and the draw becomes an effective no-op.
+  width = width < 1u ? 1u : width;
+  height = height < 1u ? 1u : height;
+  // Mali's GLES rejects glTexStorage2D with GL_INVALID_VALUE when the requested mip
+  // count exceeds floor(log2(max(w,h)))+1. Some GX textures over-specify their mip
+  // chain (harmless on desktop Mesa, fatal on Mali), so clamp to the legal maximum.
+  {
+    uint32_t maxMips = 1;
+    for (uint32_t d = (width > height ? width : height); d > 1u; d >>= 1) {
+      ++maxMips;
+    }
+    if (mips > maxMips) {
+      Log.warn("Clamping texture '{}' mip levels {} -> {} for {}x{} (Mali glTexStorage2D limit)", label, mips, maxMips,
+               width, height);
+      mips = maxMips;
+    }
+    if (mips == 0) {
+      mips = 1;
+    }
+  }
+  const auto glFormat = to_gl(gxFormat);
+  const gl::Extent3D size{
       .width = width,
       .height = height,
       .depthOrArrayLayers = 1,
   };
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = wgpuFormat,
-      .mipLevelCount = mips,
-      .sampleCount = 1,
-  };
-  auto texture = g_device.CreateTexture(&textureDescriptor);
-  const auto viewLabel = fmt::format("{} view", label);
-  wgpu::TextureViewDescriptor textureViewDescriptor{
-      .label = viewLabel.c_str(),
-      .format = wgpuFormat,
-      .dimension = wgpu::TextureViewDimension::e2D,
-      .mipLevelCount = mips,
-  };
-  wgpu::TextureComponentSwizzleDescriptor swizzle;
-  if (setup_swizzle(swizzle, gxFormat)) {
-    textureViewDescriptor.nextInChain = &swizzle;
-  }
-  auto textureView = texture.CreateView(&textureViewDescriptor);
-  return std::make_shared<TextureRef>(std::move(texture), std::move(textureView), wgpu::TextureView{}, size, wgpuFormat,
-                                      mips, gxFormat);
+  // Sampleable texture: created on the render worker (marshaled). Base-game GX formats
+  // all decode to RGBA8 on the CPU; the R8/RG8 replacement-pack swizzle is a later
+  // concern (texture-replacement re-verify), not the Ordon path.
+  gl::Texture texture = create_gl_texture(glFormat, size, mips, /*renderable=*/false);
+  return std::make_shared<TextureRef>(texture, texture, gl::Texture{}, size, glFormat, mips, gxFormat);
 }
 
 TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
   ZoneScoped;
 
-  const auto wgpuFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
-  const wgpu::Extent3D size{
+  // Clamp to at least 1x1 — a 0-sized target (e.g. a shadow EFB-resolve copy under
+  // shadowResolutionMultiplier=0) crashes Mali's glTexStorage2D with GL_INVALID_VALUE.
+  width = width < 1u ? 1u : width;
+  height = height < 1u ? 1u : height;
+  const auto glFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
+  const gl::Extent3D size{
       .width = width,
       .height = height,
       .depthOrArrayLayers = 1,
   };
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::RenderAttachment,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = wgpuFormat,
-      .mipLevelCount = 1,
-      .sampleCount = 1,
-  };
-  auto texture = g_device.CreateTexture(&textureDescriptor);
-
-  // Create texture view for color attachments
-  const auto viewLabel = fmt::format("{} view", label);
-  wgpu::TextureViewDescriptor textureViewDescriptor{
-      .label = viewLabel.c_str(),
-      .format = wgpuFormat,
-      .dimension = wgpu::TextureViewDimension::e2D,
-  };
-  auto attachmentTextureView = texture.CreateView(&textureViewDescriptor);
-  wgpu::TextureView sampleTextureView = attachmentTextureView;
-  return std::make_shared<TextureRef>(std::move(texture), std::move(sampleTextureView),
-                                      std::move(attachmentTextureView), size, wgpuFormat, 1, gxFormat);
+  // A render texture is both a sampleable texture and an FBO color attachment, so both
+  // "views" are the same GL name. Created renderable on the worker.
+  gl::Texture texture = create_gl_texture(glFormat, size, 1, /*renderable=*/true);
+  return std::make_shared<TextureRef>(texture, texture, texture, size, glFormat, 1, gxFormat);
 }
 
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
   ZoneScoped;
 
-  const auto wgpuFormat = to_wgpu(gxFormat);
-  const wgpu::Extent3D size{
+  // Clamp to at least 1x1 — a 0-sized copy-conv target crashes Mali's glTexStorage2D.
+  width = width < 1u ? 1u : width;
+  height = height < 1u ? 1u : height;
+  const auto glFormat = to_gl(gxFormat);
+  const gl::Extent3D size{
       .width = width,
       .height = height,
       .depthOrArrayLayers = 1,
   };
-  const wgpu::TextureDescriptor textureDescriptor{
-      .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment,
-      .dimension = wgpu::TextureDimension::e2D,
-      .size = size,
-      .format = wgpuFormat,
-      .mipLevelCount = 1,
-      .sampleCount = 1,
-  };
-  auto texture = g_device.CreateTexture(&textureDescriptor);
-
-  // Create texture view for color attachments
-  const auto viewLabel = fmt::format("{} view", label);
-  wgpu::TextureViewDescriptor textureViewDescriptor{
-      .label = viewLabel.c_str(),
-      .format = wgpuFormat,
-      .dimension = wgpu::TextureViewDimension::e2D,
-  };
-  auto attachmentTextureView = texture.CreateView(&textureViewDescriptor);
-  wgpu::TextureView sampleTextureView = attachmentTextureView;
-  return std::make_shared<TextureRef>(std::move(texture), std::move(sampleTextureView),
-                                      std::move(attachmentTextureView), size, wgpuFormat, 1, gxFormat);
+  // Conversion-target texture: sampled and used as an FBO color attachment (Phase 4
+  // EFB copies render into it). Created renderable on the worker.
+  gl::Texture texture = create_gl_texture(glFormat, size, 1, /*renderable=*/true);
+  return std::make_shared<TextureRef>(texture, texture, texture, size, glFormat, 1, gxFormat);
 }
 
-bool write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
+void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
   ZoneScoped;
 
-  ConvertedTexture converted{};
+  ConvertedTexture converted;
   if (ref.gxFormat != InvalidTextureFormat) {
     converted = convert_texture(ref.gxFormat, ref.size.width, ref.size.height, ref.mipCount, data);
     ref.hasArbitraryMips = converted.hasArbitraryMips;
@@ -340,7 +205,7 @@ bool write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
 
   uint32_t offset = 0;
   for (uint32_t mip = 0; mip < ref.mipCount; ++mip) {
-    const wgpu::Extent3D mipSize{
+    const gl::Extent3D mipSize{
         .width = std::max(ref.size.width >> mip, 1u),
         .height = std::max(ref.size.height >> mip, 1u),
         .depthOrArrayLayers = ref.size.depthOrArrayLayers,
@@ -353,65 +218,15 @@ bool write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
     const uint32_t dataSize = bytesPerRow * heightBlocks * mipSize.depthOrArrayLayers;
     CHECK(offset + dataSize <= data.size(), "write_texture: expected at least {} bytes, got {}", offset + dataSize,
           data.size());
-    const wgpu::TexelCopyTextureInfo dstView{
-        .texture = ref.texture,
-        .mipLevel = mip,
-    };
-    if constexpr (UseTextureBuffer) {
-      if (!queue_texture_upload_data(data.data() + offset, bytesPerRow, heightBlocks, std::move(dstView),
-                                     physicalSize)) {
-        return false;
-      }
-    } else {
-      const wgpu::TexelCopyBufferLayout dataLayout{
-          .bytesPerRow = bytesPerRow,
-          .rowsPerImage = heightBlocks,
-      };
-      g_queue.WriteTexture(&dstView, data.data() + offset, dataSize, &dataLayout, &physicalSize);
-    }
+    // Uploads route to the render worker (glTexSubImage2D at the op slot); the
+    // WebGPU staging-buffer + queue.WriteTexture path is gone (plan Phase 2). The
+    // recording thread just records {ptr, tex, layout}.
+    queue_texture_upload_data(data.data() + offset, bytesPerRow, heightBlocks, ref.texture, gl::Origin3D{}, physicalSize,
+                              mip);
     offset += dataSize;
   }
   if (data.size() != UINT32_MAX && offset < data.size()) {
     Log.warn("write_texture: texture used {} bytes, but given {} bytes", offset, data.size());
   }
-  return true;
-}
-
-wgpu::SamplerDescriptor TextureBind::get_descriptor() const noexcept {
-  auto [minFilter, mipFilter] = wgpu_filter_mode(texObj.min_filter());
-  auto [magFilter, _] = wgpu_filter_mode(texObj.mag_filter());
-  const bool mipsEnabled = mipFilter != wgpu::MipmapFilterMode::Undefined;
-  float minLod = texObj.min_lod();
-  float maxLod = texObj.max_lod();
-  u16 maxAnisotropy = wgpu_aniso(texObj.max_aniso());
-  if (ref && ref->isReplacement) {
-    minLod = 0.f;
-    maxLod = 1000.f;
-    if (!mipsEnabled) {
-      mipFilter = wgpu::MipmapFilterMode::Nearest;
-    }
-  } else if (mipFilter == wgpu::MipmapFilterMode::Undefined) {
-    minLod = 0.f;
-    maxLod = 0.f;
-  }
-  if ((ref && ref->hasArbitraryMips) || !mipsEnabled) {
-    maxAnisotropy = 1;
-  } else if (maxAnisotropy > 1) {
-    magFilter = wgpu::FilterMode::Linear;
-    minFilter = wgpu::FilterMode::Linear;
-    mipFilter = wgpu::MipmapFilterMode::Linear;
-  }
-  return {
-      .label = "Generated Filtering Sampler",
-      .addressModeU = wgpu_address_mode(texObj.wrap_s()),
-      .addressModeV = wgpu_address_mode(texObj.wrap_t()),
-      .addressModeW = wgpu::AddressMode::Repeat,
-      .magFilter = magFilter,
-      .minFilter = minFilter,
-      .mipmapFilter = mipFilter,
-      .lodMinClamp = minLod,
-      .lodMaxClamp = maxLod,
-      .maxAnisotropy = maxAnisotropy,
-  };
 }
 } // namespace aurora::gfx

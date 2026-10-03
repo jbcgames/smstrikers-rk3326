@@ -16,13 +16,12 @@ function(aurora_find_package_global)
   set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ${_PREV_FIND_PACKAGE_TARGETS_GLOBAL})
 endfunction()
 
-if (AURORA_ENABLE_GX)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraDawnProvider.cmake)
-  set(AURORA_DAWN_IS_SHARED "${AURORA_DAWN_IS_SHARED}" PARENT_SCOPE)
-endif ()
+# Dawn removed: the hand-rolled GLES backend (lib/gl/) replaces it. The provider
+# (which fetched + built Dawn and vendored Abseil) is gone; Abseil is fetched
+# standalone below.
 
-# Abseil is needed for core libraries. It normally comes via Dawn's vendor build.
-# Otherwise prefer a system package and only fetch it as a last resort.
+# Abseil is needed for core libraries. It normally came via Dawn's vendor build;
+# now prefer a system package and fetch it standalone as a fallback.
 if (NOT TARGET absl::flat_hash_map OR NOT TARGET absl::btree)
   aurora_find_package_global(absl CONFIG QUIET GLOBAL)
 endif ()
@@ -175,7 +174,6 @@ if (AURORA_ENABLE_GX)
     message(STATUS "aurora: Using existing libpng")
   endif ()
 
-  if (NOT NX)
   aurora_find_package_global(Freetype QUIET)
   if (NOT TARGET Freetype::Freetype)
     message(STATUS "aurora: Fetching Freetype")
@@ -192,7 +190,6 @@ if (AURORA_ENABLE_GX)
     add_library(Freetype::Freetype ALIAS freetype)
   else ()
     message(STATUS "aurora: Using existing Freetype")
-  endif ()
   endif ()
 
   if (NOT TARGET imgui)
@@ -215,17 +212,27 @@ if (AURORA_ENABLE_GX)
     )
     target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
 
-    set(AURORA_IMGUI_BACKEND_SOURCES ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp)
-    if (NOT NX)
-      # sdl3on2 lacks parts of the SDL3 API these backends call.
-      list(APPEND AURORA_IMGUI_BACKEND_SOURCES
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp
-      )
+    # The Dawn WebGPU imgui backend is gone; the GLES backend renders via
+    # imgui_impl_opengl3 ("#version 300 es"). imgui_impl_sdl3 is the platform backend
+    # (input/timing); imgui_impl_sdlrenderer3 stays for the headless/NULL backend.
+    add_library(imgui_backends STATIC
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp
+      ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+    # imgui_impl_opengl3 renders on our GLES 3.0 context. Without IMGUI_IMPL_OPENGL_ES3 it
+    # compiles the desktop-GL path, whose embedded gl3w loader dlopen()s libGL.so -- absent on
+    # Mali/PowerVR (loader init fails -> "Failed to initialize OpenGL loader!" -> NewFrame
+    # null-derefs, the device crash). ES3 makes it #include <GLES3/gl3.h> and call GLES entry
+    # points directly (only core ES3 calls; the desktop-only glPolygonMode/DrawElementsBaseVertex/
+    # ClipControl are #if-gated out), resolved from libGLESv2 -- libmali on device, Mesa on the
+    # dev box. Linking libGLESv2 is exactly what every normal SDL+GLES app does (Normalcy rule 7).
+    target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_OPENGL_ES3)
+    find_library(AURORA_GLESV2_LIB GLESv2)
+    if (NOT AURORA_GLESV2_LIB)
+      set(AURORA_GLESV2_LIB GLESv2) # fall back to the linker's own -lGLESv2 search
     endif ()
-    add_library(imgui_backends STATIC ${AURORA_IMGUI_BACKEND_SOURCES})
-    target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
-    target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} dawn::webgpu_dawn)
+    target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} ${AURORA_GLESV2_LIB})
     target_link_libraries(imgui PUBLIC imgui_backends)
 
     if (TARGET Freetype::Freetype)

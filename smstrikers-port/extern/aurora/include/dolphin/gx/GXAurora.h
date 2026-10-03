@@ -130,6 +130,7 @@ typedef enum _AuroraViewportPolicy {
  * When AURORA_VIEWPORT_NATIVE is used, GXSetTexCopySrc/GXSetTexCopyDst will use native framebuffer resolution.
  */
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
+void AuroraSetDisplayAspect(f32 aspect);
 
 /**
  * Retrieves the current content framebuffer size.

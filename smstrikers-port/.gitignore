@@ -2,3 +2,19 @@ build/
 compile_commands.json
 .DS_Store
 results/
+
+# Game data and ROMs (never commit copyright ROMs)
+data/
+*.iso
+*.ISO
+*.gcz
+*.GCZ
+*.gcm
+*.GCM
+*.ciso
+*.CISO
+
+# Build artifacts
+*.elf
+strikers
+strikers.exe

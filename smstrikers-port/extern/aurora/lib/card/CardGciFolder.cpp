@@ -3,7 +3,7 @@
 #include <cstring>
 
 #include <filesystem>
-#include "../io.hpp"
+#include "../fs_helper.hpp"
 
 #include "Directory.hpp"
 #include "FileIO.hpp"
@@ -71,7 +71,9 @@ void CardGciFolder::InitCard(const char* game, const char* maker) {
 ECardResult CardGciFolder::openFile(const char* filename, FileHandle& handleOut) {
   int idx = 0;
   for (auto& gciFile : m_files) {
-    if (strcmp(filename, gciFile.file.m_filename) == 0) {
+    if (std::memcmp(m_game, gciFile.file.m_game, 4) == 0 &&
+        std::memcmp(m_maker, gciFile.file.m_maker, 2) == 0 &&
+        std::strncmp(filename, gciFile.file.m_filename, CARD_FILENAME_MAX) == 0) {
       gciFile.opened = true;
       if (gciFile.fileSize == 0)
         gciFile.fileSize = std::filesystem::file_size(m_folderPath / gciFile.filename);
@@ -82,7 +84,6 @@ ECardResult CardGciFolder::openFile(const char* filename, FileHandle& handleOut)
     idx++;
   }
 
-  /* smstrikers-port: NOFILE, not NOCARD. The card is mounted and readable; the one thing that is missing is this file, which is what CARD_RESULT_NOFILE means and what CardRawFile::openFile already returns for it. */
   return ECardResult::NOFILE;
 }
 
@@ -97,7 +98,6 @@ ECardResult CardGciFolder::openFile(uint32_t fileno, FileHandle& handleOut) {
     return ECardResult::READY;
   }
 
-  /* smstrikers-port: NOFILE, as above; an index past the end is a file that is not there, not an absent card. */
   return ECardResult::NOFILE;
 }
 
@@ -144,46 +144,35 @@ ECardResult CardGciFolder::closeFile(FileHandle& fh) {
 }
 
 void CardGciFolder::deleteFile(const FileHandle& fh) {
-  auto file = get_open_file(fh);
-  if (!file)
-    return;
-
-  FileIO fileIO(m_folderPath / file->filename, true);
-  if (fileIO)
-    fileIO.deleteFile();
+  (void)deleteFile(fh.getFileNo());
 }
 
-/* smstrikers-port: delete the file, instead of reporting a card that is not there. Both overloads were stubs returning NOCARD, so no save could be deleted at all on the folder-of-.gci backend a desktop build uses; neither name nor index matching is NOFILE, and an open file is BUSY, which is what the SDK's own CARDDeleteAsync answers for it. */
 ECardResult CardGciFolder::deleteFile(const char* filename) {
-  uint32_t fileno = 0;
-  for (const auto& gciFile : m_files) {
-    if (strcmp(filename, gciFile.file.m_filename) == 0) {
-      return deleteFile(fileno);
+  for (uint32_t i = 0; i < m_files.size(); ++i) {
+    const auto& gciFile = m_files[i];
+    if (std::memcmp(m_game, gciFile.file.m_game, 4) == 0 &&
+        std::memcmp(m_maker, gciFile.file.m_maker, 2) == 0 &&
+        std::strncmp(filename, gciFile.file.m_filename, CARD_FILENAME_MAX) == 0) {
+      return deleteFile(i);
     }
-    fileno++;
   }
 
   return ECardResult::NOFILE;
 }
 
 ECardResult CardGciFolder::deleteFile(uint32_t fileno) {
-  auto* gciFile = get_file(fileno);
-  if (gciFile == nullptr) {
+  auto* file = get_file(fileno);
+  if (!file)
     return ECardResult::NOFILE;
-  }
-  if (gciFile->opened) {
-    return ECardResult::BUSY;
-  }
 
-  const auto path = m_folderPath / gciFile->filename;
-  FileIO fileIO(path, true);
-  if (!fileIO || !fileIO.deleteFile()) {
-    Log.error("Failed to delete GCI file '{}'", io::fs_path_to_string(path));
+  FileIO fileIO(m_folderPath / file->filename);
+  if (!fileIO)
+    return ECardResult::NOFILE;
+  if (!fileIO.deleteFile())
     return ECardResult::IOERROR;
-  }
 
-  /* m_files *is* this card's listing, and the index into it is the file number: an entry left behind is a file getStatus still describes with nothing on disk behind it. */
-  m_files.erase(m_files.begin() + static_cast<std::ptrdiff_t>(fileno));
+  (void)m_bat.clear(file->file.m_firstBlock, file->file.m_blockCount);
+  m_files.erase(m_files.begin() + fileno);
   return ECardResult::READY;
 }
 
@@ -195,7 +184,7 @@ ECardResult CardGciFolder::renameFile(const char* oldName, const char* newName) 
     }
   }
 
-  return ECardResult::NOCARD;
+  return ECardResult::NOFILE;
 }
 
 ECardResult CardGciFolder::fileWrite(FileHandle& fh, const void* buf, size_t size) {
@@ -210,7 +199,7 @@ ECardResult CardGciFolder::fileWrite(FileHandle& fh, const void* buf, size_t siz
     return ECardResult::NOFILE;
   }
 
-  return ECardResult::NOCARD;
+  return ECardResult::NOFILE;
 }
 
 ECardResult CardGciFolder::fileRead(FileHandle& fh, void* dst, size_t size) {
@@ -225,7 +214,7 @@ ECardResult CardGciFolder::fileRead(FileHandle& fh, void* dst, size_t size) {
     return ECardResult::NOFILE;
   }
 
-  return ECardResult::NOCARD;
+  return ECardResult::NOFILE;
 }
 
 void CardGciFolder::seek(FileHandle& fh, int32_t pos, SeekOrigin whence) {
@@ -368,8 +357,8 @@ void CardGciFolder::getEncoding(uint16_t& encoding) const { encoding = (uint16_t
 void CardGciFolder::format(ECardSlot deviceId, ECardSize size, EEncoding encoding) {
   m_encoding = encoding;
 
-  if (!io::create_directories(m_folderPath)) {
-    Log.error("Failed to create directory {}: {}", io::fs_path_to_string(m_folderPath), SDL_GetError());
+  if (!std::filesystem::create_directories(m_folderPath)) {
+    Log.error("Failed to create directory: {}", fs_path_to_string(m_folderPath));
   }
 }
 
@@ -389,14 +378,14 @@ bool CardGciFolder::open(const std::filesystem::path& filepath) {
   std::error_code ec;
   if (!std::filesystem::exists(filepath, ec) || !std::filesystem::is_directory(filepath, ec)) {
     if (ec) {
-      Log.warn("Failed to inspect GCI folder '{}': {}", io::fs_path_to_string(filepath), ec.message());
+      Log.warn("Failed to inspect GCI folder '{}': {}", fs_path_to_string(filepath), ec.message());
     }
     return false;
   }
 
   std::filesystem::directory_iterator it(filepath, std::filesystem::directory_options::skip_permission_denied, ec);
   if (ec) {
-    Log.warn("Failed to enumerate GCI folder '{}': {}", io::fs_path_to_string(filepath), ec.message());
+    Log.warn("Failed to enumerate GCI folder '{}': {}", fs_path_to_string(filepath), ec.message());
     return false;
   }
 
@@ -405,13 +394,13 @@ bool CardGciFolder::open(const std::filesystem::path& filepath) {
     const auto path = it->path();
     const auto status = it->status(ec);
     if (ec) {
-      Log.warn("Failed to inspect GCI folder entry '{}': {}", io::fs_path_to_string(path), ec.message());
+      Log.warn("Failed to inspect GCI folder entry '{}': {}", fs_path_to_string(path), ec.message());
       return false;
     }
     if (!std::filesystem::is_regular_file(status)) {
       it.increment(ec);
       if (ec) {
-        Log.warn("Failed to continue enumerating GCI folder '{}': {}", io::fs_path_to_string(filepath), ec.message());
+        Log.warn("Failed to continue enumerating GCI folder '{}': {}", fs_path_to_string(filepath), ec.message());
         return false;
       }
       continue;
@@ -420,7 +409,7 @@ bool CardGciFolder::open(const std::filesystem::path& filepath) {
     if (path.extension() != ".gci") {
       it.increment(ec);
       if (ec) {
-        Log.warn("Failed to continue enumerating GCI folder '{}': {}", io::fs_path_to_string(filepath), ec.message());
+        Log.warn("Failed to continue enumerating GCI folder '{}': {}", fs_path_to_string(filepath), ec.message());
         return false;
       }
       continue;
@@ -428,13 +417,13 @@ bool CardGciFolder::open(const std::filesystem::path& filepath) {
 
     FileIO file(path);
     if (!file) {
-      Log.warn("Failed to open GCI file '{}'", io::fs_path_to_string(path));
+      Log.warn("Failed to open GCI file '{}'", fs_path_to_string(path));
       return false;
     }
 
     File fileData;
     if (!file.fileRead(&fileData, sizeof(File), 0)) {
-      Log.warn("Failed to read GCI file '{}'", io::fs_path_to_string(path));
+      Log.warn("Failed to read GCI file '{}'", fs_path_to_string(path));
       return false;
     }
     fileData.swapEndian();
@@ -443,7 +432,7 @@ bool CardGciFolder::open(const std::filesystem::path& filepath) {
 
     it.increment(ec);
     if (ec) {
-      Log.warn("Failed to continue enumerating GCI folder '{}': {}", io::fs_path_to_string(filepath), ec.message());
+      Log.warn("Failed to continue enumerating GCI folder '{}': {}", fs_path_to_string(filepath), ec.message());
       return false;
     }
   }

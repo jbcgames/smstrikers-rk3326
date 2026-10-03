@@ -24,8 +24,6 @@ protected:
     aurora::gfx::depth_peek::testing::reset();
   }
 
-  void TearDown() override { aurora::gx::fifo::shutdown(); }
-
   // Copy the internal FIFO buffer contents and clear it
   std::vector<u8> capture_fifo() {
     auto size = aurora::gx::fifo::get_buffer_size();
@@ -40,7 +38,7 @@ protected:
 
   // Decode a captured FIFO byte stream through the command processor
   void decode_fifo(const std::vector<u8>& bytes) {
-    aurora::gx::fifo::process(bytes.data(), static_cast<u32>(bytes.size()));
+    aurora::gx::fifo::process(bytes.data(), static_cast<u32>(bytes.size()), true);
   }
 
   // Flush dirty state, then capture the FIFO buffer

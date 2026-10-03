@@ -48,10 +48,9 @@ void set_window_size(uint32_t width, uint32_t height);
 void set_window_position(uint32_t x, uint32_t y);
 void center_window();
 void request_frame_buffer_resize();
-// smstrikers-port: the work request_frame_buffer_resize defers to the next event pump, done now; a wrapper because resize_swapchain has internal linkage.
 void resize_frame_buffer_now();
+float get_frame_buffer_scale();
 void set_frame_buffer_scale(float scale);
-float get_frame_buffer_scale();  // smstrikers-port
 void set_frame_buffer_aspect_fit(bool fit);
 void set_background_input(bool value);
 }; // namespace aurora::window

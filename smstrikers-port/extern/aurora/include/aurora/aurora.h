@@ -86,8 +86,6 @@ typedef struct {
   const char* resourcesPath;
   AuroraBackend desiredBackend;
   uint32_t msaa;
-  /* smstrikers-port: pipeline compilation threads; 0 sizes it to the core count. */
-  uint32_t pipelineJobs;
   uint16_t maxTextureAnisotropy;
   bool vsync;
   bool startFullscreen;
@@ -107,6 +105,7 @@ typedef struct {
   AuroraLogCallback logCallback;
   AuroraLogLevel logLevel;
   AuroraImGuiInitCallback imGuiInitCallback;
+  uint32_t pipelineJobs;
 
   /*
    * The size of the GameCube's main memory, or MEM1 on the Wii.

@@ -45,8 +45,6 @@ struct RawTextureReplacement {
 
 struct ReplacementOptions {
   int32_t priority = 0;
-  // smstrikers-port: the strict budget counts `root` as one pack, not each folder in it.
-  bool onePack = false;
 };
 
 struct ReplacementRegistration {
@@ -98,23 +96,6 @@ void reload_replacement_directory(const std::filesystem::path& root, Replacement
                                   ReplacementOptions options = {});
 
 bool has_replacement(const GXTexObj* obj, const GXTlutObj* tlut = nullptr);
-
-/// smstrikers-port: bytes of loaded replacements kept before LRU eviction; 4 GB by default.
-void set_replacement_cache_budget(uint64_t bytes);
-
-/// smstrikers-port: starts loading the replacement for a texture the game has just made.
-void prefetch_replacement(const GXTexObj* obj, const GXTlutObj* tlut = nullptr);
-
-/// smstrikers-port: true makes a texture's first draw wait for a replacement still loading, not draw its original.
-void set_replacement_wait(bool wait);
-
-/// smstrikers-port: true holds replacements to the cache budget, skipping any pack folder bigger than it.
-void set_replacement_strict_budget(bool strict);
-
-enum class DumpResult { Written, Exists, Failed };
-
-/// smstrikers-port: writes `obj`'s base level to `dir` as a PNG under Dolphin's dump name, unless it exists.
-DumpResult dump_texture(const GXTexObj* obj, const GXTlutObj* tlut, const std::filesystem::path& dir);
 
 } // namespace aurora::texture
 

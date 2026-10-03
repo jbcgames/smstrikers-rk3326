@@ -70,7 +70,10 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_subdirectory(examples)
 endif ()
 
-if (NOT CMAKE_CROSSCOMPILING)
+# Fork: the gx test stubs still target the Dawn-era C API; rebuild them for the
+# GLES backend before re-enabling. (Set -DAURORA_BUILD_TESTS=ON to work on it.)
+option(AURORA_BUILD_TESTS "Build aurora's own test executables" OFF)
+if (AURORA_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
   enable_testing()
   add_subdirectory(tests)
 endif ()

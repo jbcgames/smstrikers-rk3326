@@ -1,0 +1,37 @@
+{
+  "version": 4,
+  "name": "strikers.zip",
+  "items": [
+    "Super Mario Strikers.sh",
+    "strikers"
+  ],
+  "items_opt": [],
+  "attr": {
+    "title": "Super Mario Strikers",
+    "porter": [
+      "Community"
+    ],
+    "desc": "Super Mario Strikers native port for RK3326 / Mali-G31 with OpenGL ES 3.0",
+    "desc_md": null,
+    "inst": "Place your Super Mario Strikers GameCube disc image (G4QE01.iso or .gcz) or extracted files/ folder in the 'strikers/' directory.",
+    "inst_md": null,
+    "genres": [
+      "sports",
+      "action"
+    ],
+    "image": null,
+    "rtr": false,
+    "exp": true,
+    "runtime": [],
+    "store": [],
+    "availability": "paid",
+    "reqs": [
+      "arm64",
+      "gles3"
+    ],
+    "arch": [
+      "aarch64"
+    ],
+    "min_glibc": "2.31"
+  }
+}

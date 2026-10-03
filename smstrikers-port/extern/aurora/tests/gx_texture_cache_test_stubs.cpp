@@ -6,7 +6,6 @@
 #include "internal.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <fmt/format.h>
 #include <memory>
@@ -15,8 +14,6 @@
 namespace {
 uint64_t s_textureAllocations = 0;
 uint64_t s_paletteConversions = 0;
-std::atomic<uint64_t> s_textureConversions{0};
-uint64_t s_convertedAllocations = 0;
 aurora::gfx::TextureHandle s_replacement;
 std::optional<aurora::texture::TextureSourceKey> s_sourceKey;
 aurora::gfx::TextureHandle s_sourceReplacement;
@@ -50,8 +47,6 @@ gfx::TextureHandle make_texture_handle(uint32_t width, uint32_t height, u32 form
 void reset_texture_stubs() {
   s_textureAllocations = 0;
   s_paletteConversions = 0;
-  s_textureConversions = 0;
-  s_convertedAllocations = 0;
   s_replacement.reset();
   s_sourceKey.reset();
   s_sourceReplacement.reset();
@@ -61,8 +56,6 @@ void reset_texture_stubs() {
 
 uint64_t texture_allocations() { return s_textureAllocations; }
 uint64_t palette_conversions() { return s_paletteConversions; }
-uint64_t texture_conversions() { return s_textureConversions; }
-uint64_t converted_allocations() { return s_convertedAllocations; }
 void set_replacement(gfx::TextureHandle handle, uint64_t id) {
   s_replacement = std::move(handle);
   s_replacementId = id;
@@ -91,34 +84,6 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
   handle->mipCount = mips;
   return handle;
 }
-
-TextureHandle new_static_texture_2d_converted(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
-                                              wgpu::TextureFormat wgpuFormat, ArrayRef<uint8_t> converted,
-                                              bool hasArbitraryMips, const char* label) noexcept {
-  ++s_convertedAllocations;
-  auto handle = gx::testing::make_texture_handle(width, height, gxFormat);
-  handle->mipCount = mips;
-  return handle;
-}
-
-ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
-  ++s_textureConversions;
-  size_t pixels = 0;
-  for (uint32_t mip = 0; mip < mips; ++mip) {
-    pixels += static_cast<size_t>(std::max(width >> mip, 1u)) * std::max(height >> mip, 1u);
-  }
-  return ConvertedTexture{
-      .format = wgpu::TextureFormat::RGBA8Unorm,
-      .width = width,
-      .height = height,
-      .mips = mips,
-      .data = ByteBuffer(pixels * 4),
-  };
-}
-
-TexLoadTiming g_texLoadTiming;
-bool tex_log_enabled() noexcept { return false; }
-uint64_t tex_log_now_ns() noexcept { return 0; }
 
 TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
   return gx::testing::make_texture_handle(width, height, gxFormat);

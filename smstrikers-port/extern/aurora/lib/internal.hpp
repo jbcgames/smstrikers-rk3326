@@ -7,7 +7,6 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
-#include <cstdio>
 #include <type_traits>
 #include <vector>
 #include <cstring>
@@ -121,7 +120,7 @@ struct uint_of_size<8> {
   using type = uint64_t;
 };
 template <size_t N>
-using uint_of_size_t = uint_of_size<N>::type;
+using uint_of_size_t = typename uint_of_size<N>::type;
 
 template <typename T>
   requires(std::is_floating_point_v<T> && requires { typename uint_of_size_t<sizeof(T)>; })
@@ -163,6 +162,9 @@ ALWAYS_INLINE constexpr auto underlying(T value) noexcept -> std::underlying_typ
 #else
 #define CHECK(cond, msg, ...) AURORA_ASSERT(cond, msg, ##__VA_ARGS__)
 #endif
+// Fork compat: our GLES-era code spells this ASSERT. Defined unconditionally,
+// unlike upstream's CHECK which is compiled out under NDEBUG.
+#define ASSERT(cond, msg, ...) AURORA_ASSERT(cond, msg, ##__VA_ARGS__)
 #define DEFAULT_FATAL(msg, ...) UNLIKELY default : FATAL(msg, ##__VA_ARGS__)
 #define TRY(cond, msg, ...)                                                                                            \
   if (!(cond))                                                                                                         \
@@ -312,14 +314,6 @@ public:
   void clear() { m_length = 0; }
   void reserve_extra(size_t size) { resize(m_length + size, true); }
 
-  // smstrikers-port: grow by `size` bytes and return where they start, for writing in place.
-  [[nodiscard]] uint8_t* append_uninitialized(size_t size) {
-    resize(m_length + size, false);
-    uint8_t* out = m_data + m_length;
-    m_length += size;
-    return out;
-  }
-
   ByteBuffer clone() const {
     ByteBuffer clone{m_length};
     std::memcpy(clone.data(), m_data, m_length);
@@ -340,15 +334,6 @@ private:
       m_owned = true;
     } else if (size > m_capacity) {
       if (!m_owned) {
-        // smstrikers-port: name the pool before dying. The bare abort() below
-        // does not raise SIGABRT through any handler, so the process exits 134
-        // with nothing anywhere. Each pool's capacity constant is distinct.
-        fprintf(stderr,
-                "aurora: FATAL: fixed GPU staging pool overflow: need %zu bytes, capacity %zu."
-                " The pool sizes are compile-time constants in lib/gfx/resources.hpp;"
-                " the capacity identifies which one overflowed.\n",
-                size, m_capacity);
-        fflush(stderr);
         abort();
       }
       if (size < m_capacity * 2) {

@@ -40,7 +40,6 @@ uint32_t s_pressedMouseButtons = 0;
 std::array<TrackedTouch, MaxTrackedTouches> s_trackedTouches{};
 float s_uiScale = 0.0f;
 webgpu::TextureWithSampler s_renderTarget;
-wgpu::BindGroup s_renderTargetCopyBindGroup;
 
 WebGPURenderInterface* get_render_interface() noexcept {
   return static_cast<WebGPURenderInterface*>(Backend::GetRenderInterface()); // NOLINT(*-pro-type-static-cast-downcast)
@@ -82,7 +81,6 @@ void ensure_render_target(Rml::Vector2i dimensions) noexcept {
     return;
   }
   s_renderTarget = webgpu::create_render_texture(width, height, false);
-  s_renderTargetCopyBindGroup = webgpu::create_copy_bind_group(s_renderTarget);
 }
 
 bool element_has_visible_backdrop_filter(const Rml::Element* element) noexcept {
@@ -477,7 +475,8 @@ RecordedFrame record_frame(const webgpu::Viewport& presentViewport) noexcept {
     return {};
   }
   return {
-      .bindGroup = s_renderTargetCopyBindGroup,
+      .texture = s_renderTarget.view,
+      .sampler = s_renderTarget.sampler,
       .overlay = !needsBackdrop,
   };
 }
@@ -491,6 +490,5 @@ void shutdown() noexcept {
   Backend::Shutdown();
   g_context = nullptr;
   s_renderTarget = {};
-  s_renderTargetCopyBindGroup = {};
 }
 } // namespace aurora::rmlui

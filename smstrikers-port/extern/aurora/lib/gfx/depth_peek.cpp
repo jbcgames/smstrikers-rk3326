@@ -19,10 +19,6 @@ namespace aurora::gfx::depth_peek {
 namespace {
 Module Log("aurora::gfx::depth_peek");
 
-using webgpu::g_device;
-using webgpu::g_instance;
-using webgpu::g_queue;
-
 using Clock = std::chrono::steady_clock;
 
 constexpr size_t SlotCount = 3;
@@ -56,31 +52,25 @@ enum class SlotState : uint8_t {
 };
 
 struct Slot {
-  wgpu::Buffer storageBuffer;
-  wgpu::Buffer readbackBuffer;
-  wgpu::Buffer paramsBuffer;
+  gl::Buffer storageBuffer;
+  gl::Buffer readbackBuffer;
+  gl::Buffer paramsBuffer;
   uint32_t width = 0;
   uint32_t height = 0;
   uint64_t byteSize = 0;
   SlotState state = SlotState::Available;
 };
 
-struct PendingMap {
-  size_t slotIdx = 0;
-  wgpu::Buffer readbackBuffer;
-  uint64_t byteSize = 0;
-};
-
 bool g_enabled = false;
 std::array<Slot, SlotCount> g_slots;
 size_t g_nextSlot = 0;
-wgpu::BindGroupLayout g_bindGroupLayout;
-wgpu::ComputePipeline g_pipeline;
 bool g_snapshotRequested = false;
 Clock::time_point g_nextSnapshotTime;
 LatestSnapshot g_latest;
 std::mutex g_mutex;
 
+// WGSL kept as dead source for the Phase 2+ depth-readback compute pass. Phase 1
+// has no compute path (device parity: depth peek absent), so it is unused.
 constexpr std::string_view ShaderPreamble = R"(
 struct Params {
     dstSize: vec2u,
@@ -126,7 +116,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 }
 )"sv;
 
-std::string build_shader_source() {
+[[maybe_unused]] std::string build_shader_source() {
   std::string source;
   source.reserve(ShaderPreamble.size() + ReversedZBody.size() + ShaderMain.size());
   source += ShaderPreamble;
@@ -135,71 +125,7 @@ std::string build_shader_source() {
   return source;
 }
 
-wgpu::ComputePipeline create_pipeline(const wgpu::BindGroupLayout& bindGroupLayout, const char* label) {
-  const auto shaderSource = build_shader_source();
-  const wgpu::ShaderSourceWGSL wgslSource{wgpu::ShaderSourceWGSL::Init{
-      .code = shaderSource.c_str(),
-  }};
-  const wgpu::ShaderModuleDescriptor moduleDescriptor{
-      .nextInChain = &wgslSource,
-      .label = label,
-  };
-  const auto module = g_device.CreateShaderModule(&moduleDescriptor);
-
-  const wgpu::PipelineLayoutDescriptor layoutDescriptor{
-      .bindGroupLayoutCount = 1,
-      .bindGroupLayouts = &bindGroupLayout,
-  };
-  const auto pipelineLayout = g_device.CreatePipelineLayout(&layoutDescriptor);
-  const wgpu::ComputePipelineDescriptor pipelineDescriptor{
-      .label = label,
-      .layout = pipelineLayout,
-      .compute =
-          wgpu::ComputeState{
-              .module = module,
-              .entryPoint = "cs_main",
-          },
-  };
-  return g_device.CreateComputePipeline(&pipelineDescriptor);
-}
-
-wgpu::BindGroupLayout create_bind_group_layout(const char* label) {
-  constexpr std::array entries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Compute,
-          .texture =
-              wgpu::TextureBindingLayout{
-                  .sampleType = wgpu::TextureSampleType::Depth,
-                  .viewDimension = wgpu::TextureViewDimension::e2D,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 1,
-          .visibility = wgpu::ShaderStage::Compute,
-          .buffer =
-              wgpu::BufferBindingLayout{
-                  .type = wgpu::BufferBindingType::Storage,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 2,
-          .visibility = wgpu::ShaderStage::Compute,
-          .buffer =
-              wgpu::BufferBindingLayout{
-                  .type = wgpu::BufferBindingType::Uniform,
-              },
-      },
-  };
-  const wgpu::BindGroupLayoutDescriptor descriptor{
-      .label = label,
-      .entryCount = entries.size(),
-      .entries = entries.data(),
-  };
-  return g_device.CreateBindGroupLayout(&descriptor);
-}
-
-Params make_params(wgpu::Extent3D sourceSize, Vec2<uint32_t> dstSize) noexcept {
+Params make_params(gl::Extent3D sourceSize, Vec2<uint32_t> dstSize) noexcept {
   Params params{
       .dstWidth = dstSize.x,
       .dstHeight = dstSize.y,
@@ -246,30 +172,14 @@ bool ensure_slot(Slot& slot, uint32_t width, uint32_t height) {
     return false;
   }
 
-  const wgpu::BufferDescriptor storageDescriptor{
-      .label = "Depth Peek Storage Buffer",
-      .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc,
-      .size = byteSize,
-  };
-  slot.storageBuffer = g_device.CreateBuffer(&storageDescriptor);
-
-  const wgpu::BufferDescriptor readbackDescriptor{
-      .label = "Depth Peek Readback Buffer",
-      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
-      .size = byteSize,
-  };
-  slot.readbackBuffer = g_device.CreateBuffer(&readbackDescriptor);
-
-  const wgpu::BufferDescriptor paramsDescriptor{
-      .label = "Depth Peek Params Buffer",
-      .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
-      .size = sizeof(Params),
-  };
-  slot.paramsBuffer = g_device.CreateBuffer(&paramsDescriptor);
-  return slot.storageBuffer && slot.readbackBuffer && slot.paramsBuffer;
+  // Phase 1 stub (device parity: depth peek absent)
+  // Phase 2+: allocate the GL storage/readback/uniform buffers here (was three
+  // wgpu CreateBuffer calls: Storage|CopySrc, MapRead|CopyDst, Uniform|CopyDst).
+  // With no GPU buffers there is no slot to fill, so no snapshot is produced.
+  return false;
 }
 
-Slot* find_available_slot(uint32_t width, uint32_t height) {
+[[maybe_unused]] Slot* find_available_slot(uint32_t width, uint32_t height) {
   for (size_t i = 0; i < g_slots.size(); ++i) {
     const size_t idx = (g_nextSlot + i) % g_slots.size();
     auto& slot = g_slots[idx];
@@ -284,40 +194,18 @@ Slot* find_available_slot(uint32_t width, uint32_t height) {
   }
   return nullptr;
 }
-
-void complete_slot(size_t slotIdx, wgpu::MapAsyncStatus status, wgpu::StringView message) {
-  std::lock_guard lock{g_mutex};
-  auto& slot = g_slots[slotIdx];
-  if (status == wgpu::MapAsyncStatus::Success) {
-    const auto valueCount = static_cast<size_t>(slot.width) * static_cast<size_t>(slot.height);
-    const auto* mapped =
-        static_cast<const uint32_t*>(slot.readbackBuffer.GetConstMappedRange(0, valueCount * sizeof(uint32_t)));
-    if (mapped != nullptr) {
-      g_latest.width = slot.width;
-      g_latest.height = slot.height;
-      g_latest.data.assign(mapped, mapped + valueCount);
-    }
-    slot.readbackBuffer.Unmap();
-  } else if (status != wgpu::MapAsyncStatus::CallbackCancelled && status != wgpu::MapAsyncStatus::Aborted) {
-    Log.warn("Depth Peek readback mapping failed {}: {}", magic_enum::enum_name(status), message);
-  }
-  slot.state = SlotState::Available;
-}
 } // namespace
 
 void initialize() {
-  if (!webgpu::g_hasCoreFeatures) {
-    return;
-  }
-  g_bindGroupLayout = create_bind_group_layout("Depth Peek Bind Group Layout");
-  g_pipeline = create_pipeline(g_bindGroupLayout, "Depth Peek Pipeline");
-  g_enabled = true;
+  // Phase 1 stub (device parity: depth peek absent)
+  // Phase 2+: create the GX PeekZ compute pipeline + bind group layout. Compute is
+  // unavailable on the GLES compat path, so depth peek stays disabled and
+  // read_latest() reports no snapshot.
+  g_enabled = false;
 }
 
 void shutdown() {
   testing::reset();
-  g_pipeline = {};
-  g_bindGroupLayout = {};
   for (auto& slot : g_slots) {
     slot = {};
   }
@@ -340,8 +228,7 @@ bool read_latest(uint16_t x, uint16_t y, uint32_t& z) noexcept {
   return true;
 }
 
-void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& depthView,
-                           wgpu::Extent3D sourceSize, uint32_t msaaSamples) noexcept {
+void encode_frame_snapshot(const gl::Texture& depthView, gl::Extent3D sourceSize, uint32_t msaaSamples) noexcept {
   if (!g_enabled) {
     return;
   }
@@ -366,62 +253,15 @@ void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureV
   }
 
   const Params params = make_params(sourceSize, dstSize);
-  wgpu::Buffer storageBuffer;
-  wgpu::Buffer readbackBuffer;
-  wgpu::Buffer paramsBuffer;
-  uint64_t byteSize = 0;
-  {
-    std::lock_guard lock{g_mutex};
-    auto* slot = find_available_slot(dstSize.x, dstSize.y);
-    if (slot == nullptr) {
-      return;
-    }
-    slot->state = SlotState::CopySubmitted;
-    storageBuffer = slot->storageBuffer;
-    readbackBuffer = slot->readbackBuffer;
-    paramsBuffer = slot->paramsBuffer;
-    byteSize = slot->byteSize;
-  }
+  (void)params;
 
-  AURORA_ASSERT(render_worker::is_worker_thread(), "Depth peek queue write must run on the render worker");
-  g_queue.WriteBuffer(paramsBuffer, 0, &params, sizeof(params));
-
-  const std::array bindGroupEntries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .textureView = depthView,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 1,
-          .buffer = storageBuffer,
-          .size = byteSize,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 2,
-          .buffer = paramsBuffer,
-          .size = sizeof(Params),
-      },
-  };
-  const wgpu::BindGroupDescriptor bindGroupDescriptor{
-      .label = "Depth Peek Bind Group",
-      .layout = g_bindGroupLayout,
-      .entryCount = bindGroupEntries.size(),
-      .entries = bindGroupEntries.data(),
-  };
-  const auto bindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
-
-  const wgpu::ComputePassDescriptor passDescriptor{
-      .label = "Depth Peek Compute Pass",
-      .timestampWrites = webgpu::gpu_prof::pass_writes("Depth peek"),
-  };
-  const auto pass = cmd.BeginComputePass(&passDescriptor);
-  pass.SetPipeline(g_pipeline);
-  pass.SetBindGroup(0, bindGroup);
-  pass.DispatchWorkgroups((dstSize.x + WorkgroupSizeX - 1) / WorkgroupSizeX,
-                          (dstSize.y + WorkgroupSizeY - 1) / WorkgroupSizeY);
-  pass.End();
-
-  cmd.CopyBufferToBuffer(storageBuffer, 0, readbackBuffer, 0, byteSize);
+  // Phase 1 stub (device parity: depth peek absent)
+  // Phase 2+: WriteBuffer(params) -> bind the depth texture + storage + params ->
+  // dispatch the GX PeekZ compute shader ((dst + 7) / 8 workgroups) ->
+  // CopyBufferToBuffer(storage -> readback). Compute is unavailable on the GLES
+  // compat path, so nothing is encoded and no snapshot is produced.
+  (void)WorkgroupSizeX;
+  (void)WorkgroupSizeY;
 }
 
 void after_submit() noexcept {
@@ -429,29 +269,16 @@ void after_submit() noexcept {
     return;
   }
 
-  std::vector<PendingMap> pendingMaps;
-  {
-    std::lock_guard lock{g_mutex};
-    for (size_t i = 0; i < g_slots.size(); ++i) {
-      auto& slot = g_slots[i];
-      if (slot.state != SlotState::CopySubmitted) {
-        continue;
-      }
-      slot.state = SlotState::MapPending;
-      pendingMaps.push_back({
-          .slotIdx = i,
-          .readbackBuffer = slot.readbackBuffer,
-          .byteSize = slot.byteSize,
-      });
+  // Phase 1 stub (device parity: depth peek absent)
+  // Phase 2+: map each CopySubmitted slot's readback buffer and publish the mapped
+  // depth values into g_latest (was wgpu MapAsync + GetConstMappedRange). With no
+  // GPU copy in flight there is nothing to map; g_latest stays empty so read_latest
+  // returns false, which callers tolerate.
+  std::lock_guard lock{g_mutex};
+  for (auto& slot : g_slots) {
+    if (slot.state == SlotState::CopySubmitted || slot.state == SlotState::MapPending) {
+      slot.state = SlotState::Available;
     }
-  }
-
-  for (const auto& pending : pendingMaps) {
-    pending.readbackBuffer.MapAsync(
-        wgpu::MapMode::Read, 0, pending.byteSize, wgpu::CallbackMode::AllowSpontaneous,
-        [slotIdx = pending.slotIdx](wgpu::MapAsyncStatus status, wgpu::StringView message) {
-          complete_slot(slotIdx, status, message);
-        });
   }
 }
 

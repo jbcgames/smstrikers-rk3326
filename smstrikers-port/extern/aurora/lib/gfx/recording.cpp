@@ -630,7 +630,7 @@ void queue_texture_upload(TextureUpload upload) {
   current_frame_packet().textureUploads.emplace_back(std::move(upload));
 }
 
-bool queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
+void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32_t rowsPerImage,
                                wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) {
   const auto copyBytesPerRow = AURORA_ALIGN(bytesPerRow, 256);
   auto& frame = current_frame_packet();
@@ -642,7 +642,7 @@ bool queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32
         .rowsPerImage = rowsPerImage,
     };
     queue_texture_upload(TextureUpload{layout, std::move(tex), size});
-    return true;
+    return;
   }
 
   const uint64_t uploadSize = copyBytesPerRow * rowsPerImage;
@@ -652,18 +652,8 @@ bool queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32
       .size = uploadSize,
       .mappedAtCreation = true,
   };
-#if defined(__SWITCH__)
-  // smstrikers-port: out of memory skips the upload instead of ending the game.
-  webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::OutOfMemory);
-#endif
   auto buffer = webgpu::g_device.CreateBuffer(&descriptor);
   auto* dst = static_cast<uint8_t*>(buffer.GetMappedRange(0, uploadSize));
-#if defined(__SWITCH__)
-  if (webgpu::pop_out_of_memory_scope() || dst == nullptr) {
-    Log.warn("no memory for a {} MiB texture upload", uploadSize >> 20);
-    return false;
-  }
-#endif
   for (uint32_t row = 0; row < rowsPerImage; ++row) {
     memcpy(dst, data, bytesPerRow);
     data += bytesPerRow;
@@ -677,7 +667,6 @@ bool queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32
       .rowsPerImage = rowsPerImage,
   };
   queue_texture_upload(TextureUpload{layout, std::move(tex), size, std::move(buffer)});
-  return true;
 }
 
 void queue_texture_copy(wgpu::TexelCopyTextureInfo src, wgpu::TexelCopyTextureInfo dst, wgpu::Extent3D size) {

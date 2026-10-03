@@ -1,7 +1,3 @@
-#include <atomic>
-#include <iterator>
-#include <cstdio>
-#include <cstdlib>
 #include "encoding.hpp"
 
 #include "frame.hpp"
@@ -326,102 +322,15 @@ constexpr uint64_t IndexStagingOffset = UniformStagingOffset + UniformBufferSize
 constexpr uint64_t StorageStagingOffset = IndexStagingOffset + IndexBufferSize;
 constexpr uint64_t TextureUploadStagingOffset = StorageStagingOffset + StorageBufferSize;
 
-// smstrikers-port: staging copies on 64 KiB boundaries (hasvk runs vkCmdCopyBuffer as a blorp blit; off-page copies corrupt vertex data and the extent search burns CPU).
-constexpr uint32_t StagingCopyAlign = 64 * 1024;
-
-constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~(StagingCopyAlign - 1); }
-
-// smstrikers-port: STRIKERS_LOG_GPUMEM prints each fixed pool's per-frame peak
-// against what resources.hpp reserved for it, which nothing else reports.
-namespace {
-struct PoolPeak {
-  std::atomic<uint32_t> verts{0}, uniforms{0}, indices{0}, storage{0}, textureUpload{0};
-};
-PoolPeak g_poolPeak;
-
-void bump(std::atomic<uint32_t>& slot, uint32_t v) {
-  uint32_t prev = slot.load(std::memory_order_relaxed);
-  while (v > prev && !slot.compare_exchange_weak(prev, v, std::memory_order_relaxed)) {
-  }
-}
-
-void pool_peak_report() {
-  const auto row = [](const char* name, uint64_t peak, uint64_t reserved, uint64_t copies) {
-    fprintf(stderr, "%-14s %10.2f %12.2f %12.2f  %6.2f%%\n", name, peak / 1048576.0, reserved / 1048576.0,
-            (reserved * copies) / 1048576.0, reserved ? 100.0 * (double)peak / (double)reserved : 0.0);
-  };
-  fprintf(stderr, "\n=== GPU pool usage (peak per frame vs reserved) ===\n");
-  fprintf(stderr, "%-14s %10s %12s %12s  %s\n", "pool", "peak MiB", "reserved MiB", "total MiB", "used");
-  // Each pool exists once device-side and once inside every staging buffer.
-  const uint64_t copies = 1 + StagingBufferCount;
-  row("vertex", g_poolPeak.verts.load(), VertexBufferSize, copies);
-  row("uniform", g_poolPeak.uniforms.load(), UniformBufferSize, copies);
-  row("index", g_poolPeak.indices.load(), IndexBufferSize, copies);
-  row("storage", g_poolPeak.storage.load(), StorageBufferSize, copies);
-  if constexpr (UseTextureBuffer) {
-    row("textureUpload", g_poolPeak.textureUpload.load(), TextureUploadSize, copies);
-  }
-  const uint64_t reservedTotal =
-      (VertexBufferSize + UniformBufferSize + IndexBufferSize + StorageBufferSize +
-       (UseTextureBuffer ? TextureUploadSize : 0)) * copies;
-  fprintf(stderr, "staging slots: %zu + 1 device-side copy = %llu x %.2f MiB reserved = %.2f MiB\n",
-          StagingBufferCount, (unsigned long long)copies, StagingBufferSize / 1048576.0,
-          reservedTotal / 1048576.0);
-  fprintf(stderr, "==================================================\n\n");
-}
-
-bool pool_peak_enabled() {
-  static const bool on = [] {
-    const bool v = getenv("STRIKERS_LOG_GPUMEM") != nullptr;
-    if (v) std::atexit(pool_peak_report);
-    return v;
-  }();
-  return on;
-}
-
-void pool_peak_record(const StagingHighWater& hw) {
-  // Unconditional: five relaxed atomic maxes a frame, and the debug overlay
-  // reads the number every frame whether or not a run asked to measure it.
-  pool_peak_enabled();
-  bump(g_poolPeak.verts, hw.verts);
-  bump(g_poolPeak.uniforms, hw.uniforms);
-  bump(g_poolPeak.indices, hw.indices);
-  bump(g_poolPeak.storage, hw.storage);
-  bump(g_poolPeak.textureUpload, hw.textureUpload);
-}
-} // namespace
-
-// smstrikers-port: read the staging pool peaks from outside Aurora. Order matches
-// kPoolNames in src/platform/overlay.cpp.
-extern "C" void aurora_gfx_pool_stats(uint32_t* peakBytes, uint32_t* reservedBytes, size_t count) {
-  const uint32_t peaks[] = {
-      g_poolPeak.verts.load(std::memory_order_relaxed),
-      g_poolPeak.uniforms.load(std::memory_order_relaxed),
-      g_poolPeak.indices.load(std::memory_order_relaxed),
-      g_poolPeak.storage.load(std::memory_order_relaxed),
-      g_poolPeak.textureUpload.load(std::memory_order_relaxed),
-  };
-  const uint32_t reserved[] = {
-      static_cast<uint32_t>(VertexBufferSize),  static_cast<uint32_t>(UniformBufferSize),
-      static_cast<uint32_t>(IndexBufferSize),   static_cast<uint32_t>(StorageBufferSize),
-      static_cast<uint32_t>(UseTextureBuffer ? TextureUploadSize : 0),
-  };
-  const size_t n = count < std::size(peaks) ? count : std::size(peaks);
-  for (size_t i = 0; i < n; ++i) {
-    if (peakBytes != nullptr) peakBytes[i] = peaks[i];
-    if (reservedBytes != nullptr) reservedBytes[i] = reserved[i];
-  }
-}
+constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~3u; }
 
 void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& frame, uint32_t& copied,
-                               uint32_t highWater, uint64_t stagingOffset, uint64_t poolSize,
-                               const wgpu::Buffer& dst) {
+                               uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst) {
   if (highWater <= copied) {
     return;
   }
   const uint32_t copyStart = align_down_copy_offset(copied);
-  const uint32_t copyEnd =
-      static_cast<uint32_t>(std::min<uint64_t>(AURORA_ALIGN(uint64_t{highWater}, StagingCopyAlign), poolSize));
+  const uint32_t copyEnd = AURORA_ALIGN(highWater, 4);
   cmd.CopyBufferToBuffer(staging_buffer(frame.stagingBuffer), stagingOffset + copyStart, dst, copyStart,
                          copyEnd - copyStart);
   copied = highWater;
@@ -429,7 +338,6 @@ void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& fra
 
 bool needs_staging_copy(const FramePacket& frame, const FrameOp& op) {
   const auto& highWater = op.highWater;
-  pool_peak_record(highWater);
   if (highWater.verts > frame.copied.verts || highWater.uniforms > frame.copied.uniforms ||
       highWater.indices > frame.copied.indices || highWater.storage > frame.copied.storage) {
     return true;
@@ -447,14 +355,12 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
   const webgpu::gpu_prof::Zone zone{cmd, "Staging copies"};
   const auto& highWater = op.highWater;
   auto& res = resources();
-  copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, VertexBufferSize,
-                            res.vertexBuffer);
+  copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, res.vertexBuffer);
   copy_staging_buffer_range(cmd, frame, frame.copied.uniforms, highWater.uniforms, UniformStagingOffset,
-                            UniformBufferSize, res.uniformBuffer);
-  copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, IndexBufferSize,
-                            res.indexBuffer);
+                            res.uniformBuffer);
+  copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, res.indexBuffer);
   copy_staging_buffer_range(cmd, frame, frame.copied.storage, highWater.storage, StorageStagingOffset,
-                            StorageBufferSize, res.storageBuffer);
+                            res.storageBuffer);
 
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {

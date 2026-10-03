@@ -5,7 +5,6 @@
 #include "../gfx/texture_convert.hpp"
 #include "../gfx/texture_replacement.hpp"
 #include "shader_info.hpp"
-#include "../thread.hpp"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -14,16 +13,10 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <list>
-#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -132,7 +125,6 @@ std::list<TextureContentKey> s_contentLru;
 uint64_t s_contentCacheBytes = 0;
 uint64_t s_contentCacheBudgetBytes = texture::ContentCacheBudgetBytes;
 uint64_t s_frameCount = 0;
-uint64_t s_lastDrainNs = 0;  // smstrikers-port: for AURORA_TEX_LOG, see note_drain_wait
 uint64_t s_bindGeneration = 1;
 std::atomic<uint64_t> s_pendingInvalidations = 0;
 std::atomic<uint64_t> s_pendingCacheClears = 0;
@@ -281,304 +273,12 @@ void cache_content_texture(TextureContentKey key, const gfx::TextureHandle& hand
   s_stats.contentCacheEntries = s_contentCache.size();
 }
 
-// smstrikers-port: converts textures in the background from GXInitTexObjLOD; any miss converts inline as before.
-namespace pre {
-constexpr uint64_t ReadyBudgetBytes = 128ull * 1024ull * 1024ull;  // converted results waiting to be drawn
-constexpr uint64_t QueueBudgetBytes = 64ull * 1024ull * 1024ull;   // source copies queued or being converted
-constexpr auto ReadyLifetime = std::chrono::seconds{120};          // results not drawn by then are dropped
-constexpr size_t KeySetLimit = 16384;                              // bounds seenContent and queuedObjects
-constexpr uint64_t MaintenanceFrames = 300;
-
-using Clock = std::chrono::steady_clock;
-
-struct Job {
-  ByteBuffer source;
-  u32 width = 0;
-  u32 height = 0;
-  u32 format = 0;
-  u32 mips = 0;
-};
-
-struct Parked {
-  ByteBuffer data;
-  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
-  bool hasArbitraryMips = false;
-  Clock::time_point parkedAt;
-  std::list<TextureContentKey>::iterator lru;
-};
-
-struct Taken {
-  ByteBuffer data;
-  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
-  bool hasArbitraryMips = false;
-};
-
-struct State {
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool stop = false;
-  aurora::thread::Thread thread;
-
-  std::deque<Job> queue;
-  uint64_t queueBytes = 0;  // includes the job being converted
-
-  absl::flat_hash_map<TextureContentKey, Parked> parked;
-  std::list<TextureContentKey> parkedLru;  // most recent at the front
-  uint64_t parkedBytes = 0;
-
-  // Dedupe only: clearing either set at KeySetLimit costs repeat work, never a wrong texture.
-  absl::flat_hash_set<TextureContentKey> seenContent;
-  absl::flat_hash_set<uint64_t> queuedObjects;
-
-  // For AURORA_TEX_LOG.
-  uint64_t copiedBytes = 0;
-  uint64_t copyNs = 0;
-  uint64_t parkedPeakBytes = 0;
-  uint64_t expiredBytes = 0;
-};
-
-// Leaked: destroying a running std::jthread at static destruction terminates the process.
-State& state() noexcept {
-  static auto* s_state = new State;
-  return *s_state;
-}
-
-bool enabled() noexcept {
-  static const bool s_enabled = [] {
-    const char* e = std::getenv("AURORA_TEX_PRECONVERT");
-    return e == nullptr || *e == '\0' || std::strcmp(e, "0") != 0;
-  }();
-  return s_enabled;
-}
-
-// Palette formats need the TLUT bound at draw time, and PC formats upload unconverted.
-bool converts(u32 format) noexcept {
-  switch (format) {
-  case GX_TF_I4:
-  case GX_TF_I8:
-  case GX_TF_IA4:
-  case GX_TF_IA8:
-  case GX_TF_RGB565:
-  case GX_TF_RGB5A3:
-  case GX_TF_RGBA8:
-  case GX_TF_CMPR:
-    return true;
-  default:
-    return false;
-  }
-}
-
-void insert_bounded(absl::flat_hash_set<TextureContentKey>& set, const TextureContentKey& key) {
-  if (set.size() >= KeySetLimit) {
-    set.clear();
-  }
-  set.insert(key);
-}
-
-void erase_parked_locked(State& st, absl::flat_hash_map<TextureContentKey, Parked>::iterator it) {
-  st.parkedBytes -= it->second.data.size();
-  st.parkedLru.erase(it->second.lru);
-  st.parked.erase(it);
-}
-
-// Drops results past their lifetime, then the oldest until the budget holds.
-void expire_locked(State& st, Clock::time_point now) {
-  while (!st.parkedLru.empty()) {
-    const auto it = st.parked.find(st.parkedLru.back());
-    const bool stale = now - it->second.parkedAt > ReadyLifetime;
-    if (!stale && st.parkedBytes <= ReadyBudgetBytes) {
-      break;
-    }
-    st.expiredBytes += it->second.data.size();
-    erase_parked_locked(st, it);
-  }
-}
-
-void worker(std::stop_token) {
-  auto& st = state();
-  for (;;) {
-    Job job;
-    {
-      std::unique_lock lock{st.mutex};
-      st.cv.wait(lock, [&] { return st.stop || !st.queue.empty(); });
-      if (st.stop) {
-        return;
-      }
-      job = std::move(st.queue.front());
-      st.queue.pop_front();
-    }
-
-    // Must match hash_texture_source's contentKey for a texture without a TLUT.
-    const TextureContentKey key{
-        .textureHash = XXH3_128bits(job.source.data(), job.source.size()),
-        .width = job.width,
-        .height = job.height,
-        .format = job.format,
-        .mipCount = job.mips,
-    };
-    bool fresh;
-    {
-      std::lock_guard lock{st.mutex};
-      fresh = !st.seenContent.contains(key);
-      if (fresh) {
-        insert_bounded(st.seenContent, key);
-      }
-    }
-    gfx::ConvertedTexture converted;
-    if (fresh) {
-      converted = gfx::convert_texture(job.format, job.width, job.height, job.mips,
-                                       {job.source.data(), job.source.size()});
-    }
-
-    std::lock_guard lock{st.mutex};
-    st.queueBytes -= job.source.size();
-    if (converted.data.empty() || converted.data.size() > ReadyBudgetBytes || st.parked.contains(key)) {
-      continue;
-    }
-    st.parkedLru.push_front(key);
-    st.parkedBytes += converted.data.size();
-    st.parked.emplace(key, Parked{
-                               .data = std::move(converted.data),
-                               .format = converted.format,
-                               .hasArbitraryMips = converted.hasArbitraryMips,
-                               .parkedAt = Clock::now(),
-                               .lru = st.parkedLru.begin(),
-                           });
-    st.parkedPeakBytes = std::max(st.parkedPeakBytes, st.parkedBytes);
-    expire_locked(st, Clock::now());
-  }
-}
-
-// FIFO thread: the parked result for this content, if there is one.
-std::optional<Taken> take(const TextureContentKey& key) noexcept {
-  auto& st = state();
-  std::lock_guard lock{st.mutex};
-  const auto it = st.parked.find(key);
-  if (it == st.parked.end()) {
-    return std::nullopt;
-  }
-  Taken taken{.data = std::move(it->second.data),
-              .format = it->second.format,
-              .hasArbitraryMips = it->second.hasArbitraryMips};
-  st.parkedBytes -= taken.data.size();
-  st.parkedLru.erase(it->second.lru);
-  st.parked.erase(it);
-  return taken;
-}
-
-// FIFO thread: this content was converted inline and uploaded, so a later job for it has nothing to do.
-void mark_uploaded(const TextureContentKey& key) noexcept {
-  auto& st = state();
-  std::lock_guard lock{st.mutex};
-  insert_bounded(st.seenContent, key);
-}
-
-// Main thread, from GXInitTexObjLOD.
-void enqueue(const GXTexObj_& obj) noexcept {
-  const u32 mips = obj.mip_count();
-  const size_t bytes = texture::texture_source_size(obj.format(), obj.width(), obj.height(), mips);
-  if (bytes == 0) {
-    return;
-  }
-  const uint64_t objectKey = (static_cast<uint64_t>(obj.texObjId) << 32) | obj.texDataVersion;
-  auto& st = state();
-  {
-    std::lock_guard lock{st.mutex};
-    if (st.queueBytes + bytes > QueueBudgetBytes) {
-      return;
-    }
-    if (st.queuedObjects.size() >= KeySetLimit) {
-      st.queuedObjects.clear();
-    }
-    if (!st.queuedObjects.insert(objectKey).second) {
-      return;
-    }
-    st.queueBytes += bytes;  // reserved before the copy, so the budget also bounds copies in progress
-  }
-
-  // Copied here, on the thread that owns the data, so the game may free or rewrite it afterwards.
-  const bool timing = gfx::tex_log_enabled();
-  const uint64_t copyStart = timing ? gfx::tex_log_now_ns() : 0;
-  Job job{.width = obj.width(), .height = obj.height(), .format = obj.format(), .mips = mips};
-  std::memcpy(job.source.append_uninitialized(bytes), obj.data, bytes);
-  const uint64_t copyNs = timing ? gfx::tex_log_now_ns() - copyStart : 0;
-
-  {
-    std::lock_guard lock{st.mutex};
-    st.copiedBytes += bytes;
-    st.copyNs += copyNs;
-    st.queue.push_back(std::move(job));
-    if (!st.thread.joinable()) {
-      st.thread = aurora::thread::Thread{
-          aurora::thread::Options{.name = "Aurora tex preconv", .priority = aurora::thread::Priority::Low}, worker};
-    }
-  }
-  st.cv.notify_one();
-}
-
-// Expires undrawn results and prints the AURORA_TEX_LOG summary.
-void maintain(uint64_t frame) noexcept {
-  if (frame % MaintenanceFrames != 0) {
-    return;
-  }
-  auto& st = state();
-  std::lock_guard lock{st.mutex};
-  expire_locked(st, Clock::now());
-  if (gfx::tex_log_enabled() && (st.copiedBytes != 0 || st.expiredBytes != 0)) {
-    std::fprintf(stderr,
-                 "[texlog] frame %llu: pre-conversion copied %.2f MB of source in %.2f ms; parked %.2f MB now, "
-                 "%.2f MB peak; expired %.2f MB unused\n",
-                 static_cast<unsigned long long>(frame), static_cast<double>(st.copiedBytes) / 1048576.0,
-                 static_cast<double>(st.copyNs) * 1e-6, static_cast<double>(st.parkedBytes) / 1048576.0,
-                 static_cast<double>(st.parkedPeakBytes) / 1048576.0,
-                 static_cast<double>(st.expiredBytes) / 1048576.0);
-    st.copiedBytes = 0;
-    st.copyNs = 0;
-    st.expiredBytes = 0;
-  }
-}
-
-void shutdown() noexcept {
-  auto& st = state();
-  {
-    std::lock_guard lock{st.mutex};
-    st.stop = true;
-  }
-  st.cv.notify_all();
-  if (st.thread.joinable()) {
-    st.thread.join();
-  }
-  std::lock_guard lock{st.mutex};
-  st.thread = {};
-  st.queue.clear();
-  st.queueBytes = 0;
-  st.parked.clear();
-  st.parkedLru.clear();
-  st.parkedBytes = 0;
-  st.seenContent.clear();
-  st.queuedObjects.clear();
-  st.stop = false;
-}
-} // namespace pre
-
 struct TextureKeys {
   TextureContentKey contentKey;
   std::optional<aurora::texture::TextureSourceKey> sourceKey;
 };
 
-TextureKeys hash_texture_source_impl(const GXTexObj_& obj, const GXTlutObj_* tlut, bool buildSourceKey);
-
 TextureKeys hash_texture_source(const GXTexObj_& obj, const GXTlutObj_* tlut, bool buildSourceKey) {
-  if (!gfx::tex_log_enabled()) {
-    return hash_texture_source_impl(obj, tlut, buildSourceKey);
-  }
-  const uint64_t t0 = gfx::tex_log_now_ns();
-  auto keys = hash_texture_source_impl(obj, tlut, buildSourceKey);
-  gfx::g_texLoadTiming.hashNs += gfx::tex_log_now_ns() - t0;
-  return keys;
-}
-
-TextureKeys hash_texture_source_impl(const GXTexObj_& obj, const GXTlutObj_* tlut, bool buildSourceKey) {
   ZoneScoped;
   const size_t textureBytes = texture::texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count());
   CHECK(obj.has_data() && textureBytes != 0, "invalid texture source for content hash");
@@ -892,22 +592,6 @@ void invalidate_replacement(uint64_t replacementId) noexcept {
   }
 }
 
-uint64_t replacement_last_used_frame(uint64_t replacementId) noexcept {
-  const auto users = s_replacementUsers.find(replacementId);
-  if (users == s_replacementUsers.end()) {
-    return 0;
-  }
-  uint64_t last = 0;
-  for (const u32 texObjId : users->second) {
-    if (const auto it = s_textureObjectCaches.find(texObjId); it != s_textureObjectCaches.end()) {
-      last = std::max(last, it->second.lastUsedFrame);
-    }
-  }
-  return last;
-}
-
-uint64_t current_frame() noexcept { return s_frameCount; }
-
 gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
   ZoneScoped;
 
@@ -945,18 +629,8 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
       const auto nameStr = "GX Static Texture";
 #endif
       const size_t sourceBytes = texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count());
-      if (auto preconverted = pre::enabled() ? pre::take(keys->contentKey) : std::nullopt) {
-        handle = gfx::new_static_texture_2d_converted(obj.width(), obj.height(), obj.mip_count(), obj.format(),
-                                                      preconverted->format,
-                                                      {preconverted->data.data(), preconverted->data.size()},
-                                                      preconverted->hasArbitraryMips, nameStr);
-      } else {
-        handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
-                                            {static_cast<const uint8_t*>(obj.data), sourceBytes}, false, nameStr);
-        if (pre::enabled()) {
-          pre::mark_uploaded(keys->contentKey);
-        }
-      }
+      handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
+                                          {static_cast<const uint8_t*>(obj.data), sourceBytes}, false, nameStr);
       ++s_stats.misses;
       s_stats.uploadBytes += texture_handle_size(handle);
       cache_content_texture(std::move(keys->contentKey), handle);
@@ -1003,13 +677,9 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
     if (!handle) {
       const size_t textureBytes = texture_source_size(obj.format(), obj.width(), obj.height(), obj.mip_count());
       const size_t tlutBytes = tlut_source_size(tlut.numEntries);
-      const uint64_t paletteStart = gfx::tex_log_enabled() ? gfx::tex_log_now_ns() : 0;
       auto converted = gfx::convert_texture_palette(obj.format(), obj.width(), obj.height(), obj.mip_count(),
                                                     {static_cast<const u8*>(obj.data), textureBytes}, tlut.format,
                                                     tlut.numEntries, {static_cast<const u8*>(tlut.data), tlutBytes});
-      if (paletteStart != 0) {
-        gfx::g_texLoadTiming.paletteNs += gfx::tex_log_now_ns() - paletteStart;
-      }
       if (converted.data.empty()) {
         return {};
       }
@@ -1029,22 +699,6 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
 }
 
 void end_frame() noexcept {
-  if (gfx::tex_log_enabled()) {
-    auto& t = gfx::g_texLoadTiming;
-    if (t.textures != 0) {
-      std::fprintf(stderr,
-                   "[texlog] t=%.3f frame %llu: %llu textures %.2f MB | hash %.2f palette %.2f create %.2f "
-                   "convert %.2f stage %.2f ms | %llu pre-converted | main waited in drain %.2f ms\n",
-                   static_cast<double>(gfx::tex_log_now_ns()) * 1e-9, static_cast<unsigned long long>(s_frameCount),
-                   static_cast<unsigned long long>(t.textures), static_cast<double>(t.bytes) / 1048576.0,
-                   t.hashNs * 1e-6, t.paletteNs * 1e-6, t.createNs * 1e-6, t.convertNs * 1e-6, t.queueNs * 1e-6,
-                   static_cast<unsigned long long>(t.preconverted), s_lastDrainNs * 1e-6);
-    }
-    t = {};
-  }
-  if (pre::enabled()) {
-    pre::maintain(s_frameCount);
-  }
   const auto streamingStats = gfx::texture_replacement::process_streaming();
   s_stats.pendingLoads = streamingStats.pendingLoads;
   s_stats.publishes = streamingStats.publishes;
@@ -1070,22 +724,7 @@ void end_frame() noexcept {
   sweep_object_caches();
 }
 
-void preconvert_texture(const GXTexObj_& obj) noexcept {
-  if (pre::enabled() && obj.has_data() && pre::converts(obj.format())) {
-    pre::enqueue(obj);
-  }
-}
-
-bool preconversion_idle_for_testing() noexcept {
-  auto& st = pre::state();
-  std::lock_guard lock{st.mutex};
-  return st.queueBytes == 0;
-}
-
-void note_drain_wait(uint64_t ns) noexcept { s_lastDrainNs = ns; }
-
 void shutdown() noexcept {
-  pre::shutdown();
   s_textureObjectCaches.clear();
   s_tlutObjectCaches.clear();
   s_replacementUsers.clear();

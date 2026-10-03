@@ -587,27 +587,28 @@ bool wait_for_staging_buffer(size_t slot) {
 size_t acquire_frame_slot() {
   ZoneScopedN("Acquire frame slot");
   const auto waitStart = PresentClock::now();
-  // smstrikers-port: blocks, since the render worker releases slots itself and never from a Dawn callback.
-  const size_t slot = g_frameSlots.acquire();
-  const auto waitDuration = PresentClock::now() - waitStart;
-  const double waitMs = std::chrono::duration<double, std::milli>{waitDuration}.count();
-  TracyPlot("aurora: frameSlotWaitMs", waitMs);
-  return slot;
+  while (true) {
+    if (const auto slot = g_frameSlots.try_acquire()) {
+      const auto waitDuration = PresentClock::now() - waitStart;
+      const double waitMs = std::chrono::duration<double, std::milli>{waitDuration}.count();
+      TracyPlot("aurora: frameSlotWaitMs", waitMs);
+      return *slot;
+    }
+    wait_for_gpu_progress(std::chrono::microseconds{100});
+  }
 }
 
 std::optional<size_t> acquire_mapped_staging_buffer() {
   ZoneScopedN("Acquire mapped staging buffer");
   while (true) {
-    if (auto slot = g_stagingSlots.acquire_for(std::chrono::milliseconds{1})) {
+    if (auto slot = g_stagingSlots.try_acquire()) {
       if (wait_for_staging_buffer(*slot)) {
         return *slot;
       }
       g_stagingSlots.release(*slot);
       return std::nullopt;
     }
-    if (render_worker::is_idle()) {
-      enqueue_process_events();
-    }
+    wait_for_gpu_progress(std::chrono::microseconds{100});
   }
 }
 
@@ -734,15 +735,4 @@ float calculate_fps() noexcept {
 } // namespace aurora::gfx
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::detail::resources().stats; }
-void aurora_get_pipeline_counts(uint32_t* queued, uint32_t* created) {
-  uint32_t q = 0;
-  uint32_t c = 0;
-  aurora::gfx::get_pipeline_counts(q, c);
-  if (queued != nullptr) {
-    *queued = q;
-  }
-  if (created != nullptr) {
-    *created = c;
-  }
-}
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }

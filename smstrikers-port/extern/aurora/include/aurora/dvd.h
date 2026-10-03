@@ -19,6 +19,7 @@ bool aurora_dvd_open(const char* disc_path);
  * Close the disc image and free all resources.
  */
 void aurora_dvd_close(void);
+void aurora_dvd_process_callbacks(void);
 
 /**
  * OVERLAY FILES!

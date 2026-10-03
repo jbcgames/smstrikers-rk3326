@@ -2,7 +2,6 @@
 #include "__gx.h"
 
 #include "../../gx/fifo.hpp"
-#include "dolphin/gd/GDGeometry.h"
 
 #include <cstring>
 
@@ -10,9 +9,10 @@
 static __GXData_struct sGXData;
 __GXData_struct* __gx = &sGXData;
 static GXFifoObj sFifoObj;
-constexpr u32 kDrawDoneCommand = static_cast<u32>(GX_BP_REG_DRAWDONE) << 24 | 2;
 
 extern "C" {
+static GXDrawDoneCallback DrawDoneCB = nullptr;
+
 GXFifoObj* GXInit(void* base, u32 size) {
   GXRenderModeObj* rmode;
   f32 identity_mtx[3][4];
@@ -31,6 +31,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
   __gx->vNum = 0;
 
   // Initialize FIFO subsystem
+  aurora::gx::fifo::init();
   GXInitFifoBase(&sFifoObj, base, size);
   GXSetCPUFifo(&sFifoObj);
   GXSetGPFifo(&sFifoObj);
@@ -264,18 +265,20 @@ GXFifoObj* GXInit(void* base, u32 size) {
 }
 
 void GXDrawDone() {
-  GXFlush();
-  GX_WRITE_RAS_REG(kDrawDoneCommand);
-  aurora::gx::fifo::drain();
+  if (DrawDoneCB != nullptr)
+    DrawDoneCB();
 }
 
 void GXSetDrawDone() {
-  GXFlush();
-  GX_WRITE_RAS_REG(kDrawDoneCommand);
-  aurora::gx::fifo::publish();
+  if (DrawDoneCB != nullptr)
+    DrawDoneCB();
 }
 
-GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) { return aurora::gx::fifo::set_draw_done_callback(cb); }
+GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) {
+  GXDrawDoneCallback old = DrawDoneCB;
+  DrawDoneCB = cb;
+  return old;
+}
 
 void GXFlush() {
   if (__gx->dirtyState) {

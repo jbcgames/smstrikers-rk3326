@@ -1025,7 +1025,7 @@ bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
     }
     return true;
   }
-  if (addr >= 0x400 && addr < 0x400 + MaxPnMtx * 9) {
+  if (addr >= 0x400 && addr < 0x45A) {
     // Normal matrices (0x400-0x459)
     u32 nrmBase = addr - 0x400;
     u32 mtxIdx = nrmBase / 9;

@@ -7,12 +7,7 @@
 
 namespace aurora::gfx::detail {
 
-#ifdef __SWITCH__
-// smstrikers-port: a third slot lets the game thread record while the GPU finishes two frames.
-inline constexpr size_t FrameSlotCount = 3;
-#else
 inline constexpr size_t FrameSlotCount = 2;
-#endif
 inline constexpr size_t StagingBufferCount = FrameSlotCount + 3;
 inline constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize +
                                               StorageBufferSize + (UseTextureBuffer ? TextureUploadSize : 0);

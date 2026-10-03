@@ -2,6 +2,15 @@ smstrikers-port/build*/
 
 smstrikers-port/data/
 *.iso
+*.ISO
+*.gcz
+*.GCZ
+*.gcm
+*.GCM
+*.ciso
+*.CISO
+*.elf
+
 smstrikers-port/extern/ffmpeg-windows-x86_64/
 smstrikers-port/extern/ffmpeg-static/
 smstrikers-port/extern/ffmpeg-switch/
@@ -17,13 +26,19 @@ smstrikers-port/assets/switch/romfs/*
 /dist/
 smstrikers-port/dist/
 
+# Scratch deployment scripts & local testing
+/portmaster/
+create_repo.sh
+deploy_assets.sh
+deploy_to_device.sh
+run_test.sh
+test_ssh.sh
+
 .DS_Store
 *.ppm
 *.pyc
 __pycache__/
 
 .vscode/
-
-
 
 *.log

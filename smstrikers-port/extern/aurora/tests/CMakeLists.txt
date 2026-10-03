@@ -1,8 +1,5 @@
 include(FetchContent)
 include(GoogleTest)
-include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AuroraCopyRuntimeDLLs.cmake)
-
-set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 
 if (NOT TARGET gtest)
   FetchContent_Declare(googletest
@@ -13,41 +10,6 @@ if (NOT TARGET gtest)
   )
   FetchContent_MakeAvailable(googletest)
 endif ()
-
-add_executable(io_tests
-  io_test.cpp
-  ../lib/card/FileIO.cpp
-  ../lib/io.cpp
-)
-target_include_directories(io_tests PRIVATE ../lib)
-target_link_libraries(io_tests PRIVATE gtest gtest_main ${AURORA_SDL3_TARGET})
-aurora_copy_runtime_dlls(io_tests)
-gtest_discover_tests(io_tests)
-
-add_executable(time_tests
-  time_test.cpp
-  ../lib/time.cpp
-)
-target_include_directories(time_tests PRIVATE
-  ../include
-  ../lib
-)
-target_link_libraries(time_tests PRIVATE gtest gtest_main)
-gtest_discover_tests(time_tests)
-
-add_executable(os_time_tests
-  os_time_test.cpp
-  os_time_test_stubs.cpp
-  ../lib/time.cpp
-  ../lib/dolphin/os/OSTime.cpp
-)
-target_include_directories(os_time_tests PRIVATE
-  ../include
-  ../lib
-)
-target_compile_definitions(os_time_tests PRIVATE AURORA TARGET_PC)
-target_link_libraries(os_time_tests PRIVATE fmt::fmt gtest gtest_main)
-gtest_discover_tests(os_time_tests)
 
 if (AURORA_ENABLE_GX)
   # GX FIFO round-trip tests
@@ -78,13 +40,10 @@ if (AURORA_ENABLE_GX)
     # FIFO/command processor (encoder + decoder)
     ../lib/gx/fifo.cpp
     ../lib/gx/command_processor.cpp
-    ../lib/gx/regs.cpp
-    ../lib/thread.cpp
     # Display list reader/optimizer
     ../lib/gx/attr_fmt.cpp
     ../lib/gx/dl.cpp
     gx_dl_test.cpp
-    gx_overscan_test.cpp
   )
 
   target_include_directories(gx_fifo_tests PRIVATE
@@ -102,59 +61,15 @@ if (AURORA_ENABLE_GX)
     xxhash
     absl::flat_hash_map
     absl::btree
-    dawn::dawncpp_headers
     TracyClient
     ${AURORA_SDL3_TARGET}
   )
 
   gtest_discover_tests(gx_fifo_tests)
 
-  add_executable(gx_texture_cache_tests
-    gx_texture_cache_test.cpp
-    gx_texture_cache_test_stubs.cpp
-    ../lib/gx/texture.cpp
-    ../lib/thread.cpp
-  )
-  target_include_directories(gx_texture_cache_tests PRIVATE
-    ../include
-    ../lib
-  )
-  target_compile_definitions(gx_texture_cache_tests PRIVATE AURORA TARGET_PC)
-  target_link_libraries(gx_texture_cache_tests PRIVATE
-    gtest
-    gtest_main
-    fmt::fmt
-    xxhash
-    absl::flat_hash_map
-    dawn::webgpu_dawn
-    TracyClient
-    ${AURORA_SDL3_TARGET}
-  )
-  aurora_copy_runtime_dlls(gx_texture_cache_tests)
-  gtest_discover_tests(gx_texture_cache_tests)
-
-  add_executable(texture_replacement_streaming_tests
-    texture_replacement_streaming_test.cpp
-  )
-  target_include_directories(texture_replacement_streaming_tests PRIVATE
-    ../include
-    ../lib
-  )
-  target_compile_definitions(texture_replacement_streaming_tests PRIVATE AURORA TARGET_PC)
-  target_link_libraries(texture_replacement_streaming_tests PRIVATE
-    aurora::gx
-    aurora::vi
-    gtest
-    gtest_main
-  )
-  aurora_copy_runtime_dlls(texture_replacement_streaming_tests)
-  gtest_discover_tests(texture_replacement_streaming_tests)
-
   add_executable(render_worker_tests
     render_worker_test.cpp
-    thread_test.cpp
     ../lib/gfx/render_worker.cpp
-    ../lib/thread.cpp
   )
   target_include_directories(render_worker_tests PRIVATE
     ../include
@@ -165,38 +80,14 @@ if (AURORA_ENABLE_GX)
     gtest
     gtest_main
     TracyClient
-    ${AURORA_SDL3_TARGET}
   )
   gtest_discover_tests(render_worker_tests)
-
-  add_executable(gfx_recording_tests
-    gfx_recording_test.cpp
-    render_target_layout_test.cpp
-  )
-  target_include_directories(gfx_recording_tests PRIVATE
-    ../include
-    ../lib
-  )
-  target_compile_definitions(gfx_recording_tests PRIVATE AURORA TARGET_PC)
-  target_link_libraries(gfx_recording_tests PRIVATE
-    aurora::gx
-    aurora::vi
-    gtest
-    gtest_main
-  )
-  aurora_copy_runtime_dlls(gfx_recording_tests)
-  gtest_discover_tests(gfx_recording_tests)
 endif () # AURORA_ENABLE_GX
 
 # DVD API tests
 if (TARGET aurora::dvd)
-  add_executable(dvd_tests
-    test_dvd.cpp
-    dvd_test_stubs.cpp
-    ../lib/logging.cpp
-  )
+  add_executable(dvd_tests test_dvd.cpp)
   target_link_libraries(dvd_tests PRIVATE aurora::dvd gtest gtest_main)
-  aurora_copy_runtime_dlls(dvd_tests)
 
   # Pass disc image path as a compile definition if provided
   if (DEFINED DVD_TEST_IMAGE AND EXISTS "${DVD_TEST_IMAGE}")

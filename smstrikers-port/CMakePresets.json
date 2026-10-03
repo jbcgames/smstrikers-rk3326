@@ -1,0 +1,64 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "linux-aarch64-gles",
+      "displayName": "Linux aarch64 GLES (RK3326 / Mali-G31)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-aarch64-gles",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchain-aarch64-linux-gnu.cmake",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install-aarch64",
+        "STRIKERS_AURORA": {
+          "type": "BOOL",
+          "value": true
+        },
+        "STRIKERS_FFMPEG": {
+          "type": "BOOL",
+          "value": false
+        },
+        "STRIKERS_DISCORD": {
+          "type": "BOOL",
+          "value": false
+        },
+        "AURORA_SDL3_PROVIDER": "vendor",
+        "AURORA_SDL3_LINKAGE": "static",
+        "SDL_UNIX_CONSOLE_BUILD": {
+          "type": "BOOL",
+          "value": true
+        },
+        "AURORA_NOD_PROVIDER": "vendor",
+        "Rust_CARGO_TARGET": "aarch64-unknown-linux-gnu"
+      }
+    },
+    {
+      "name": "linux-aarch64-gles-debug",
+      "displayName": "Linux aarch64 GLES Debug (RK3326)",
+      "inherits": ["linux-aarch64-gles"],
+      "binaryDir": "${sourceDir}/build/linux-aarch64-gles-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-aarch64-gles",
+      "configurePreset": "linux-aarch64-gles",
+      "displayName": "Linux aarch64 GLES (RK3326)",
+      "targets": ["strikers"]
+    },
+    {
+      "name": "linux-aarch64-gles-debug",
+      "configurePreset": "linux-aarch64-gles-debug",
+      "displayName": "Linux aarch64 GLES Debug (RK3326)",
+      "targets": ["strikers"]
+    }
+  ]
+}

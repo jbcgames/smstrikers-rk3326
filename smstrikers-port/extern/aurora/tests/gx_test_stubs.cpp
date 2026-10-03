@@ -1,22 +1,19 @@
 // Stub implementations for renderer symbols that the GX/FIFO/command_processor code
-// references but that live in the full renderer (gfx, gx.cpp, model/shader.cpp, etc.).
+// references but that live in the full renderer (common.cpp, gx.cpp, model/shader.cpp, etc.).
 // These allow the test binary to link without pulling in WebGPU runtime.
 
 #include "gx/gx.hpp"
 #include "gfx/clear.hpp"
-#include "gfx/resources.hpp"
+#include "gfx/common.hpp"
 #include "gfx/depth_peek.hpp"
-#include "gfx/recording.hpp"
 #include "gfx/tex_copy_conv.hpp"
 #include "gfx/tex_palette_conv.hpp"
 #include "gfx/texture.hpp"
-#include "gfx/texture_replacement.hpp"
 #include "gx/pipeline.hpp"
 #include "gx/shader_info.hpp"
 #include "internal.hpp"
 #include "webgpu/gpu.hpp"
 
-#include <atomic>
 #include <cstdio>
 #include <fmt/format.h>
 
@@ -38,24 +35,24 @@ auto fmt::formatter<AuroraLogLevel>::format(AuroraLogLevel level, format_context
   return fmt::format_to(ctx.out(), "{}", static_cast<int>(level));
 }
 
-// --- GPU resources (default-constructed, not used in tests) ---
-namespace aurora::gfx::detail {
-Resources& resources() noexcept {
-  static Resources resources;
-  return resources;
-}
-
-void increment_merged_draw_count() noexcept {}
-} // namespace aurora::gfx::detail
+// --- GPU buffers (default-constructed, not used in tests) ---
+namespace aurora::gfx {
+AuroraStats g_stats;
+wgpu::Buffer g_vertexBuffer;
+wgpu::Buffer g_uniformBuffer;
+wgpu::Buffer g_indexBuffer;
+wgpu::Buffer g_storageBuffer;
+uint32_t g_drawCallCount = 0;
+uint32_t g_mergedDrawCallCount = 0;
+} // namespace aurora::gfx
 
 namespace aurora::webgpu {
 GraphicsConfig g_graphicsConfig{};
 } // namespace aurora::webgpu
 
-// --- GXState ---
+// --- GXState (the real instance -- tests validate this) ---
 namespace aurora::gx {
 GXState g_gxState{};
-void set_viewport_policy(AuroraViewportPolicy policy) noexcept {}
 } // namespace aurora::gx
 
 namespace aurora::vi {
@@ -66,10 +63,6 @@ void configure(const GXRenderModeObj*) noexcept {}
 // --- get_texture ---
 namespace aurora::gx {
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[id]; }
-namespace texture {
-void invalidate_bindings() noexcept {}
-uint64_t current_bind_generation() noexcept { return 1; }
-} // namespace texture
 void evict_texture_object(u32 texObjId) noexcept {
   for (auto& obj : g_gxState.loadedTextures) {
     if (obj.texObjId == texObjId) {
@@ -117,8 +110,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 }
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept { return {}; }
 ShaderInfo build_shader_info(const ShaderConfig& config) noexcept { return {}; }
-gfx::Range build_uniform(const ShaderInfo& info) noexcept { return {.size = 1}; }
+gfx::Range build_uniform(const ShaderInfo& info, uint32_t vtxStart, const BindGroupRanges& ranges) noexcept {
+  return {};
+}
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
+u8 color_channel(GXChannelID id) noexcept { return 0; }
 } // namespace aurora::gx
 
 // --- Buffer push stubs ---
@@ -131,34 +127,10 @@ Range push_storage(const uint8_t* data, size_t length) { return {}; }
 Vec2<uint32_t> get_render_target_size() noexcept { return {640, 480}; }
 void set_viewport(const Viewport& viewport) noexcept {}
 void set_scissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h) noexcept {}
-uint32_t get_sample_count() noexcept { return 1; }
-RenderTargetLayout get_render_target_layout() noexcept {
-  return {
-      .colorAttachmentCount = 1,
-      .colorAttachments = {{{ColorAttachmentSemantic::SceneColor, wgpu::TextureFormat::RGBA8Unorm}}},
-      .depthStencilFormat = wgpu::TextureFormat::Depth24Plus,
-      .sampleCount = 1,
-  };
-}
 } // namespace aurora::gfx
 
 // --- Pipeline/draw command stubs ---
 namespace aurora::gfx {
-namespace clear {
-PipelineConfig make_pipeline_config(const RenderTargetLayout& layout, bool clearColor, bool clearAlpha,
-                                    bool clearDepth) noexcept {
-  return {
-      .targetLayoutKey = layout.key,
-      .depthStencilFormat = layout.depthStencilFormat,
-      .colorAttachmentCount = layout.colorAttachmentCount,
-      .msaaSamples = layout.sampleCount,
-      .clearColor = clearColor,
-      .clearAlpha = clearAlpha,
-      .clearDepth = clearDepth,
-  };
-}
-} // namespace clear
-
 template <>
 PipelineRef pipeline_ref<clear::PipelineConfig>(const clear::PipelineConfig& config) {
   return 0;
@@ -173,13 +145,11 @@ PipelineRef pipeline_ref<gx::PipelineConfig>(const gx::PipelineConfig& config) {
 }
 gx::DrawData g_testLastDraw{};
 uint32_t g_testDrawCount = 0;
-std::atomic<uint32_t> g_testProcessedDrawCount{0};
 
 template <>
 void push_draw_command<gx::DrawData>(gx::DrawData data) {
   g_testLastDraw = data;
   ++g_testDrawCount;
-  g_testProcessedDrawCount.fetch_add(1, std::memory_order_release);
 }
 template <>
 gx::DrawData* get_last_draw_command() {
@@ -210,25 +180,11 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {}
 void queue_texture_upload(TextureUpload upload) {}
 void queue_texture_upload_data(const uint8_t* data, size_t length, uint32_t bytesPerRow, uint32_t rowsPerImage,
                                wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) {}
-void queue_palette_conv(tex_palette_conv::ConvRequest req) {}
-namespace testing {
-std::atomic<uint32_t> beginOffscreenCount{0};
-std::atomic<uint32_t> endOffscreenCount{0};
-std::atomic<uint32_t> resolvePassCount{0};
-std::atomic<uint32_t> offscreenWidth{0};
-std::atomic<uint32_t> offscreenHeight{0};
-} // namespace testing
-
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
-                       Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
-  testing::resolvePassCount.fetch_add(1, std::memory_order_release);
-}
-void begin_offscreen(uint32_t width, uint32_t height) {
-  testing::offscreenWidth.store(width, std::memory_order_relaxed);
-  testing::offscreenHeight.store(height, std::memory_order_relaxed);
-  testing::beginOffscreenCount.fetch_add(1, std::memory_order_release);
-}
-void end_offscreen() { testing::endOffscreenCount.fetch_add(1, std::memory_order_release); }
+                       Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {}
+void queue_palette_conv(tex_palette_conv::ConvRequest req) {}
+void begin_offscreen(uint32_t width, uint32_t height) {}
+void end_offscreen() {}
 bool is_offscreen() noexcept { return false; }
 } // namespace aurora::gfx
 
@@ -284,6 +240,7 @@ void queue(ConvRequest req) {}
 
 namespace aurora::gfx::texture_replacement {
 u32 compute_texture_upload_size(const GXTexObj_& obj) noexcept { return 0; }
+std::optional<TextureHandle> find_replacement(const GXTexObj_&) noexcept { return std::nullopt; }
 bool has_replacement(const GXTexObj_&) noexcept { return false; }
 bool has_replacement(const GXTexObj_&, const GXTlutObj_&) noexcept { return false; }
 } // namespace aurora::gfx::texture_replacement
@@ -291,15 +248,8 @@ bool has_replacement(const GXTexObj_&, const GXTlutObj_&) noexcept { return fals
 // --- Window stub ---
 #include "../lib/window.hpp"
 namespace aurora::window {
-namespace testing {
-// smstrikers-port: GXAdjustForOverscan takes the SDK arithmetic when a game
-// has pinned the render target (set_frame_buffer_scale > 0). 0 is the stock
-// behaviour; gx_overscan_test.cpp sets it to exercise the other branch.
-float g_frameBufferScale = 0.f;
-} // namespace testing
 AuroraWindowSize get_window_size() { return {640, 480, 640, 480, 640, 480, 1.0f}; }
 void set_frame_buffer_aspect_fit(bool) {}
-float get_frame_buffer_scale() { return testing::g_frameBufferScale; }
 } // namespace aurora::window
 
 // --- WebGPU C API stubs (prevent linker errors from wgpu:: destructors) ---
@@ -330,8 +280,3 @@ void aurora::gfx::push_debug_group(std::string) {}
 void push_debug_group(const char*) {}
 void pop_debug_group() {}
 void aurora::gfx::insert_debug_marker(std::string) {}
-
-// smstrikers-port: GXInitTexObjLOD calls this, and the FIFO tests do not link the texture cache.
-namespace aurora::gx::texture {
-void preconvert_texture(const GXTexObj_&) noexcept {}
-} // namespace aurora::gx::texture

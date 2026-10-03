@@ -19,12 +19,33 @@ constexpr SystemTime kGcnEpochUnix{946684800s};
 std::once_flag s_gameEpochOnce;
 OSTime s_gameEpochOffset;
 
+std::tm utc_time(std::time_t ticks) {
+  std::tm result{};
+#if defined(_WIN32)
+  const errno_t error = gmtime_s(&result, &ticks);
+  AURORA_ASSERT(error == 0, "gmtime_s failed");
+#else
+  const std::tm* converted = gmtime_r(&ticks, &result);
+  AURORA_ASSERT(converted != nullptr, "gmtime_r failed");
+#endif
+  return result;
+}
+
+std::time_t utc_ticks(std::tm* time) {
+#if defined(_WIN32)
+  return _mkgmtime(time);
+#else
+  return timegm(time);
+#endif
+}
+
 LocalTime system_time_to_local_time(SystemTime time) {
 #if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
   return chrono::zoned_time(chrono::current_zone(), time).get_local_time();
 #else
-  // Apple libc++ currently ships <chrono> with the C++20 timezone database API disabled
-  // (_LIBCPP_HAS_TIME_ZONE_DATABASE == 0), so zoned_time/current_zone are unavailable there.
+  // libstdc++ 10 / older libc++ lack the C++20 calendar & timezone API, so use
+  // POSIX localtime_r and encode the wall-clock reading as seconds since epoch
+  // (as if UTC). timegm gives exactly that encoding.
   const auto wholeSeconds = chrono::floor<chrono::seconds>(time);
   const auto fractionalSeconds = chrono::duration_cast<SystemDuration>(time - wholeSeconds);
   const std::time_t wallClock = chrono::system_clock::to_time_t(time);
@@ -38,13 +59,8 @@ LocalTime system_time_to_local_time(SystemTime time) {
   AURORA_ASSERT(result != nullptr, "localtime_r failed in system_time_to_local_time");
 #endif
 
-  const auto localDate = chrono::local_days{chrono::year{localTm.tm_year + 1900} /
-                                            chrono::month{static_cast<unsigned>(localTm.tm_mon + 1)} /
-                                            chrono::day{static_cast<unsigned>(localTm.tm_mday)}};
-  const auto localTimeOfDay =
-      chrono::hours{localTm.tm_hour} + chrono::minutes{localTm.tm_min} + chrono::seconds{localTm.tm_sec};
-  return LocalTime{chrono::duration_cast<SystemDuration>(localDate.time_since_epoch()) +
-                   chrono::duration_cast<SystemDuration>(localTimeOfDay) + fractionalSeconds};
+  const std::time_t localTicks = utc_ticks(&localTm);
+  return LocalTime{chrono::duration_cast<SystemDuration>(chrono::seconds{localTicks}) + fractionalSeconds};
 #endif
 }
 
@@ -52,28 +68,20 @@ SystemTime local_time_to_system_time(LocalTime time) {
 #if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
   return chrono::zoned_time(chrono::current_zone(), time).get_sys_time();
 #else
-  // Apple libc++ currently ships <chrono> with the C++20 timezone database API disabled
-  // (_LIBCPP_HAS_TIME_ZONE_DATABASE == 0), so zoned_time/current_zone are unavailable there.
-  const auto& localDays = chrono::floor<chrono::days>(time);
-  const chrono::year_month_day ymd{localDays};
-  const chrono::hh_mm_ss hms{chrono::floor<chrono::microseconds>(time - localDays)};
+  // Inverse of the fallback in system_time_to_local_time: decode the
+  // wall-clock reading (encoded as-if-UTC) and apply the local timezone with
+  // mktime. Ambiguous only for the one hour at fall-back DST transitions.
+  const auto wholeSeconds = chrono::floor<chrono::seconds>(time.time_since_epoch());
+  const auto fractionalSeconds = chrono::duration_cast<SystemDuration>(time.time_since_epoch() - wholeSeconds);
+  const std::time_t localTicks = static_cast<std::time_t>(wholeSeconds.count());
 
-  std::tm localTm{};
-  localTm.tm_sec = hms.seconds().count();
-  localTm.tm_min = hms.minutes().count();
-  localTm.tm_hour = hms.hours().count();
-  localTm.tm_mday = static_cast<unsigned int>(ymd.day());
-  localTm.tm_mon = static_cast<unsigned int>(ymd.month()) - 1;
-  localTm.tm_year = static_cast<int>(ymd.year()) - 1900;
+  std::tm localTm = utc_time(localTicks);
   localTm.tm_isdst = -1;
 
   const std::time_t utcTime = mktime(&localTm);
-
   AURORA_ASSERT(utcTime != -1, "mktime failed in local_time_to_system_time");
-  static_assert(std::is_same_v<std::chrono::microseconds, decltype(hms)::precision>,
-                "hms precision must be in microseconds");
 
-  return chrono::system_clock::from_time_t(utcTime) + hms.subseconds();
+  return chrono::system_clock::from_time_t(utcTime) + fractionalSeconds;
 #endif
 }
 
@@ -114,26 +122,24 @@ void OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* td) {
   const LocalTime local =
       system_time_to_local_time(SystemTime{chrono::microseconds{OSTicksToMicroseconds(ticks)} + kGcnEpochUnix});
 
-  // Break up the time into the components we want
-  const auto localDays = chrono::floor<chrono::days>(local);
-  const chrono::year_month_weekday ymwd{localDays};
-  const chrono::year_month_day ymd{localDays};
-  const chrono::hh_mm_ss hms{chrono::floor<chrono::microseconds>(local - localDays)};
+  // The local time is a wall-clock reading encoded as seconds since epoch
+  // (as if UTC), so decode the components with gmtime.
+  const auto localSeconds = chrono::floor<chrono::seconds>(local.time_since_epoch());
+  const auto localSubseconds = chrono::duration_cast<chrono::microseconds>(local.time_since_epoch() - localSeconds);
+  const std::time_t localTicks = static_cast<std::time_t>(localSeconds.count());
+  const std::tm localTm = utc_time(localTicks);
 
-  td->sec = hms.seconds().count();
-  td->min = hms.minutes().count();
-  td->hour = hms.hours().count();
-  td->mday = static_cast<unsigned int>(ymd.day());
-  td->mon = static_cast<unsigned int>(ymd.month()) - 1;
-  td->year = static_cast<int>(ymd.year());
-  td->wday = ymwd.weekday().c_encoding();
-  td->yday = (chrono::local_days{ymd} - chrono::local_days{ymd.year() / 1 / 1}).count();
+  td->sec = localTm.tm_sec;
+  td->min = localTm.tm_min;
+  td->hour = localTm.tm_hour;
+  td->mday = localTm.tm_mday;
+  td->mon = localTm.tm_mon;
+  td->year = localTm.tm_year + 1900;
+  td->wday = localTm.tm_wday;
+  td->yday = localTm.tm_yday;
 
-  static_assert(std::is_same_v<std::chrono::microseconds, decltype(hms)::precision>,
-                "hms precision must be in microseconds");
-  td->msec = std::chrono::duration_cast<chrono::milliseconds>(hms.subseconds()).count();
-  td->usec =
-      std::chrono::duration_cast<chrono::microseconds>(hms.subseconds() - chrono::milliseconds{td->msec}).count();
+  td->msec = static_cast<int>(chrono::duration_cast<chrono::milliseconds>(localSubseconds).count());
+  td->usec = static_cast<int>(localSubseconds.count() - td->msec * 1000);
 
   AURORA_ASSERT(0 <= td->usec, "0 <= td->usec");
   AURORA_ASSERT(0 <= td->msec, "0 <= td->msec");
@@ -141,11 +147,22 @@ void OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* td) {
 }
 
 OSTime OSCalendarTimeToTicks(OSCalendarTime* td) {
-  const LocalTime& local =
-      chrono::local_days{chrono::year{td->year} / chrono::month{static_cast<unsigned int>(td->mon) + 1} /
-                         chrono::day{static_cast<unsigned int>(td->mday)}} +
-      chrono::hours{td->hour} + chrono::minutes{td->min} + chrono::seconds{td->sec} + chrono::milliseconds{td->msec} +
-      chrono::microseconds{td->usec};
+  std::tm localTm{};
+  localTm.tm_year = td->year - 1900;
+  localTm.tm_mon = td->mon;
+  localTm.tm_mday = td->mday;
+  localTm.tm_hour = td->hour;
+  localTm.tm_min = td->min;
+  localTm.tm_sec = td->sec;
+  localTm.tm_isdst = -1;
+
+  // Build the wall-clock reading (seconds since epoch, as if UTC), then hand
+  // it to local_time_to_system_time to apply the local timezone.
+  const std::time_t localTicks = utc_ticks(&localTm);
+  AURORA_ASSERT(localTicks != -1, "UTC time conversion failed in OSCalendarTimeToTicks");
+
+  const LocalTime local{chrono::duration_cast<SystemDuration>(chrono::seconds{localTicks}) +
+                        chrono::milliseconds{td->msec} + chrono::microseconds{td->usec}};
 
   const SystemTime sys = local_time_to_system_time(local);
 

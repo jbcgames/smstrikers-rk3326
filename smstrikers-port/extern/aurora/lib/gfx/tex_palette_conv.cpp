@@ -2,186 +2,122 @@
 
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
-#include "../webgpu/gpu_prof.hpp"
+#include "common.hpp"
 #include "texture.hpp"
 
-#include <vector>
+#include "../gl/fbo_cache.hpp"
+#include "../gl/gl_core.hpp"
+#include "../gl/program.hpp"
+#include "../gl/state.hpp"
+#include "../gl/textures.hpp"
+#include "render_worker.hpp"
+
+#include <string>
 
 namespace aurora::gfx::tex_palette_conv {
 static Module Log("aurora::gfx::tex_palette_conv");
 
-using webgpu::g_device;
+// Shared fullscreen-triangle vertex shader (no crop transform: paletted textures resolve
+// 1:1). Matches the WGSL vs_main.
+constexpr char kVertexSource[] = R"(#version 300 es
+out vec2 v_uv;
+void main() {
+  const vec2 positions[3] = vec2[3](vec2(-1.0, 1.0), vec2(-1.0, -3.0), vec2(3.0, 1.0));
+  const vec2 uvs[3] = vec2[3](vec2(0.0, 0.0), vec2(0.0, 2.0), vec2(2.0, 0.0));
+  gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+  v_uv = uvs[gl_VertexID];
+}
+)";
 
-static constexpr std::string_view ShaderPreambleVtx = R"(
-struct VertexOutput {
-    @builtin(position) pos: vec4f,
-    @location(0) uv: vec2f,
-};
+// Direct: R16I index texture (isampler2D) -> TLUT lookup. texelFetch for both (integer
+// index, no filtering) -- the WGSL textureLoad maps 1:1.
+constexpr char kFragDirect[] = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform highp isampler2D src;
+uniform sampler2D tlut;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  ivec2 coord = ivec2(floor(v_uv * vec2(textureSize(src, 0))));
+  int idx = texelFetch(src, coord, 0).r;
+  out_color = texelFetch(tlut, ivec2(idx, 0), 0);
+}
+)";
 
-var<private> positions: array<vec2f, 3> = array(
-    vec2f(-1.0, 1.0),
-    vec2f(-1.0, -3.0),
-    vec2f(3.0, 1.0),
-);
-var<private> uvs: array<vec2f, 3> = array(
-    vec2f(0.0, 0.0),
-    vec2f(0.0, 2.0),
-    vec2f(2.0, 0.0),
-);
+// FromFloat8: R8 texture -> 8-bit index -> TLUT.
+// The index is stored as an exact k/255 unorm; recover it by ROUNDING, not truncating.
+// In fp32, k/255 * 255.0 evaluates to k - epsilon (e.g. 40/255 -> 39.99999), so int()
+// truncates every exact index down to k-1 -- a one-entry palette shift that turns the
+// Ordon minimap's ground tint black (empirically confirmed vs the TLUT in a capture:
+// index 40 = dark green, index 39 = a black run). The WGSL reference used i32(r*255.0);
+// this is a deliberate divergence (rounding is the GX-correct reconstruction).
+constexpr char kFragFromFloat8[] = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D src;
+uniform sampler2D tlut;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  ivec2 coord = ivec2(floor(v_uv * vec2(textureSize(src, 0))));
+  float r = texelFetch(src, coord, 0).r;
+  out_color = texelFetch(tlut, ivec2(int(r * 255.0 + 0.5), 0), 0);
+}
+)";
 
-@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.pos = vec4f(positions[vi], 0.0, 1.0);
-    out.uv = uvs[vi];
-    return out;
+// FromFloat4: R8 texture -> 4-bit index -> TLUT. Round for the same reason as FromFloat8.
+constexpr char kFragFromFloat4[] = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D src;
+uniform sampler2D tlut;
+in vec2 v_uv;
+out vec4 out_color;
+void main() {
+  ivec2 coord = ivec2(floor(v_uv * vec2(textureSize(src, 0))));
+  float r = texelFetch(src, coord, 0).r;
+  out_color = texelFetch(tlut, ivec2(int(r * 15.0 + 0.5), 0), 0);
+}
+)";
+
+static gl::Pipeline g_directPipeline;
+static gl::Pipeline g_fromFloat8Pipeline;
+static gl::Pipeline g_fromFloat4Pipeline;
+static gl::Sampler g_sampler;
+
+static gl::BakedState palette_state() {
+  gl::BakedState state{};
+  state.blendEnabled = false;
+  state.depthTest = false;
+  state.depthWrite = false;
+  state.cull = gl::CullMode::None;
+  state.writeMask = gl::ColorWriteMask::All;
+  state.topology = gl::PrimitiveTopology::TriangleList;
+  return state;
 }
 
-fn intensity(rgb: vec3f) -> f32 {
-    // ITU-R BT.601 luma coefficients
-    return dot(rgb, vec3f(0.257, 0.504, 0.098)) + 16.0 / 255.0;
-}
-)"sv;
-
-// Direct: R16Sint index texture + TLUT -> RGBA8
-static constexpr std::string_view ShaderDirect = R"(
-@group(0) @binding(0) var src_samp: sampler;
-@group(0) @binding(1) var src: texture_2d<i32>;
-@group(0) @binding(2) var tlut: texture_2d<f32>;
-
-@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let texSize = vec2f(textureDimensions(src));
-    let coord = vec2i(floor(in.uv * texSize));
-    let idx = textureLoad(src, coord, 0).r;
-    return textureLoad(tlut, vec2i(idx, 0), 0);
-}
-)"sv;
-
-// FromFloat8: f32 texture (R8Unorm) -> 8-bit index -> TLUT -> RGBA8
-static constexpr std::string_view ShaderFromFloat8 = R"(
-@group(0) @binding(0) var src_samp: sampler;
-@group(0) @binding(1) var src: texture_2d<f32>;
-@group(0) @binding(2) var tlut: texture_2d<f32>;
-
-@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let texSize = vec2f(textureDimensions(src));
-    let coord = vec2i(floor(in.uv * texSize));
-    let r = textureLoad(src, coord, 0).r;
-    return textureLoad(tlut, vec2i(i32(r * 255.0), 0), 0);
-}
-)"sv;
-
-// FromFloat4: f32 texture (R8Unorm) -> 4-bit index -> TLUT -> RGBA8
-static constexpr std::string_view ShaderFromFloat4 = R"(
-@group(0) @binding(0) var src_samp: sampler;
-@group(0) @binding(1) var src: texture_2d<f32>;
-@group(0) @binding(2) var tlut: texture_2d<f32>;
-
-@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let texSize = vec2f(textureDimensions(src));
-    let coord = vec2i(floor(in.uv * texSize));
-    let r = textureLoad(src, coord, 0).r;
-    return textureLoad(tlut, vec2i(i32(r * 15.0), 0), 0);
-}
-)"sv;
-
-struct PipelineInfo {
-  wgpu::RenderPipeline pipeline;
-  wgpu::BindGroupLayout bindGroupLayout;
-};
-
-static PipelineInfo g_directPipeline;
-static PipelineInfo g_fromFloat8Pipeline;
-static PipelineInfo g_fromFloat4Pipeline;
-static wgpu::Sampler g_sampler;
-
-static PipelineInfo create_pipeline(std::string_view fragBindingsAndShader, wgpu::TextureSampleType srcSampleType,
-                                    const char* label) {
-  std::string shaderSource;
-  shaderSource.reserve(ShaderPreambleVtx.size() + fragBindingsAndShader.size());
-  shaderSource += ShaderPreambleVtx;
-  shaderSource += fragBindingsAndShader;
-
-  wgpu::ShaderSourceWGSL wgslSource{};
-  wgslSource.code = shaderSource.c_str();
-  const wgpu::ShaderModuleDescriptor moduleDescriptor{
-      .nextInChain = &wgslSource,
-      .label = label,
-  };
-  auto module = g_device.CreateShaderModule(&moduleDescriptor);
-
-  const std::array bindGroupLayoutEntries{
-      wgpu::BindGroupLayoutEntry{
-          .binding = 0,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .sampler =
-              wgpu::SamplerBindingLayout{
-                  .type = wgpu::SamplerBindingType::NonFiltering,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 1,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture =
-              wgpu::TextureBindingLayout{
-                  .sampleType = srcSampleType,
-                  .viewDimension = wgpu::TextureViewDimension::e2D,
-              },
-      },
-      wgpu::BindGroupLayoutEntry{
-          .binding = 2,
-          .visibility = wgpu::ShaderStage::Fragment,
-          .texture =
-              wgpu::TextureBindingLayout{
-                  .sampleType = wgpu::TextureSampleType::Float,
-                  .viewDimension = wgpu::TextureViewDimension::e2D,
-              },
-      },
-  };
-  const auto bindGroupLayoutLabel = fmt::format("{} Bind Group Layout", label);
-  const wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor{
-      .label = bindGroupLayoutLabel.c_str(),
-      .entryCount = bindGroupLayoutEntries.size(),
-      .entries = bindGroupLayoutEntries.data(),
-  };
-  auto bindGroupLayout = g_device.CreateBindGroupLayout(&bindGroupLayoutDescriptor);
-
-  const wgpu::PipelineLayoutDescriptor layoutDescriptor{
-      .bindGroupLayoutCount = 1,
-      .bindGroupLayouts = &bindGroupLayout,
-  };
-  auto pipelineLayout = g_device.CreatePipelineLayout(&layoutDescriptor);
-
-  constexpr std::array colorTargets{wgpu::ColorTargetState{
-      .format = wgpu::TextureFormat::RGBA8Unorm,
-  }};
-  const wgpu::FragmentState fragmentState{
-      .module = module,
-      .entryPoint = "fs_main",
-      .targetCount = colorTargets.size(),
-      .targets = colorTargets.data(),
-  };
-  const wgpu::RenderPipelineDescriptor pipelineDescriptor{
-      .label = label,
-      .layout = pipelineLayout,
-      .vertex =
-          wgpu::VertexState{
-              .module = module,
-              .entryPoint = "vs_main",
-          },
-      .primitive =
-          wgpu::PrimitiveState{
-              .topology = wgpu::PrimitiveTopology::TriangleList,
-          },
-      .fragment = &fragmentState,
-  };
-
-  return PipelineInfo{
-      .pipeline = g_device.CreateRenderPipeline(&pipelineDescriptor),
-      .bindGroupLayout = std::move(bindGroupLayout),
-  };
+// Compile a palette program (worker context current) and bind its samplers: `src` index
+// texture -> unit 0, `tlut` -> unit 1.
+static gl::Pipeline create_pipeline(const char* fragSource, const char* label) {
+  const gl::GLuint program = gl::compile_program(kVertexSource, fragSource, label);
+  if (program != 0) {
+    gl::gl.UseProgram(program);
+    const gl::GLint srcLoc = gl::gl.GetUniformLocation(program, "src");
+    if (srcLoc >= 0) {
+      gl::gl.Uniform1i(srcLoc, 0);
+    }
+    const gl::GLint tlutLoc = gl::gl.GetUniformLocation(program, "tlut");
+    if (tlutLoc >= 0) {
+      gl::gl.Uniform1i(tlutLoc, 1);
+    }
+    gl::gl.UseProgram(0);
+    gl::gl.Flush();
+  }
+  return gl::Pipeline{.program = program, .state = palette_state(), .vertexLayout = 0};
 }
 
-static const PipelineInfo& pipeline_for_variant(Variant variant) {
+static const gl::Pipeline& pipeline_for_variant(Variant variant) {
   switch (variant) {
   case Variant::Direct:
     return g_directPipeline;
@@ -194,17 +130,16 @@ static const PipelineInfo& pipeline_for_variant(Variant variant) {
 }
 
 void initialize() {
-  g_directPipeline = create_pipeline(ShaderDirect, wgpu::TextureSampleType::Sint, "TexPaletteConv Direct");
-  g_fromFloat8Pipeline =
-      create_pipeline(ShaderFromFloat8, wgpu::TextureSampleType::UnfilterableFloat, "TexPaletteConv FromFloat8");
-  g_fromFloat4Pipeline =
-      create_pipeline(ShaderFromFloat4, wgpu::TextureSampleType::UnfilterableFloat, "TexPaletteConv FromFloat4");
-  constexpr wgpu::SamplerDescriptor samplerDesc{
-      .label = "TexPaletteConv Sampler",
-      .magFilter = wgpu::FilterMode::Nearest,
-      .minFilter = wgpu::FilterMode::Nearest,
-  };
-  g_sampler = g_device.CreateSampler(&samplerDesc);
+  render_worker::enqueue_work([] {
+    g_directPipeline = create_pipeline(kFragDirect, "TexPaletteConv Direct");
+    g_fromFloat8Pipeline = create_pipeline(kFragFromFloat8, "TexPaletteConv FromFloat8");
+    g_fromFloat4Pipeline = create_pipeline(kFragFromFloat4, "TexPaletteConv FromFloat4");
+    // Nearest sampler for the index/TLUT texelFetches (integer index texture cannot be
+    // linear-filtered; ClampToEdge + Nearest defaults are correct).
+    gl::SamplerDescriptor desc{};
+    g_sampler = gl::create_sampler(desc, webgpu::g_graphicsConfig.textureAnisotropy > 0);
+  });
+  render_worker::synchronize();
 }
 
 void shutdown() {
@@ -214,49 +149,29 @@ void shutdown() {
   g_sampler = {};
 }
 
-void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
-  const auto& [pipeline, bindGroupLayout] = pipeline_for_variant(req.variant);
+void run(const ConvRequest& req) {
+  const auto& pipeline = pipeline_for_variant(req.variant);
+  if (pipeline.program == 0 || !req.dst || req.dst->attachmentTextureView.id == 0 || !req.src || !req.tlut) {
+    return;
+  }
+  const gl::GLuint fbo = gl::get_framebuffer(req.dst->attachmentTextureView);
+  gl::gl.BindFramebuffer(gl::GL_FRAMEBUFFER, fbo);
 
-  const std::array bindGroupEntries{
-      wgpu::BindGroupEntry{
-          .binding = 0,
-          .sampler = g_sampler,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 1,
-          .textureView = req.src->sampleTextureView,
-      },
-      wgpu::BindGroupEntry{
-          .binding = 2,
-          .textureView = req.tlut->sampleTextureView,
-      },
-  };
-  const wgpu::BindGroupDescriptor bindGroupDescriptor{
-      .layout = bindGroupLayout,
-      .entryCount = bindGroupEntries.size(),
-      .entries = bindGroupEntries.data(),
-  };
-  const auto bindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+  gl::gl.Disable(gl::GL_SCISSOR_TEST);
+  gl::gl.ColorMask(gl::GL_TRUE, gl::GL_TRUE, gl::GL_TRUE, gl::GL_TRUE);
+  const gl::GLfloat clearColor[4]{0.f, 0.f, 0.f, 0.f};
+  gl::gl.ClearBufferfv(gl::GL_COLOR, 0, clearColor);
+  gl::reset_state_cache();
 
-  const std::array colorAttachments{
-      wgpu::RenderPassColorAttachment{
-          .view = req.dst->attachmentTextureView,
-          .loadOp = wgpu::LoadOp::Clear,
-          .storeOp = wgpu::StoreOp::Store,
-          .clearValue = {0.0, 0.0, 0.0, 0.0},
-      },
-  };
-  const wgpu::RenderPassDescriptor renderPassDescriptor{
-      .label = "TexPaletteConv Pass",
-      .colorAttachmentCount = colorAttachments.size(),
-      .colorAttachments = colorAttachments.data(),
-      .timestampWrites = webgpu::gpu_prof::pass_writes("Palette convert"),
-  };
-  const auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
-  pass.SetPipeline(pipeline);
-  pass.SetBindGroup(0, bindGroup);
-  pass.Draw(3);
-  pass.End();
+  gl::set_viewport_gl(0, 0, static_cast<gl::GLsizei>(req.dst->size.width),
+                      static_cast<gl::GLsizei>(req.dst->size.height), 0.f, 1.f);
+  gl::use_program(pipeline.program);
+  gl::apply_baked_state(pipeline.state);
+  gl::bind_texture_unit(0, req.src->sampleTextureView.id, g_sampler.id);
+  gl::bind_texture_unit(1, req.tlut->sampleTextureView.id, g_sampler.id);
+  gl::bind_vertex_array(0);
+  gl::gl.DrawArrays(gl::GL_TRIANGLES, 0, 3);
+  gl::gl.Enable(gl::GL_SCISSOR_TEST);
 }
 
 } // namespace aurora::gfx::tex_palette_conv

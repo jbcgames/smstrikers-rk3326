@@ -9,6 +9,5 @@
 namespace aurora::vi {
 void configure(const GXRenderModeObj* rm) noexcept;
 Vec2<uint32_t> configured_fb_size() noexcept;
-// smstrikers-port: the display aspect VILockAspectRatio was given; 0 is unlocked.
 float locked_aspect() noexcept;
 } // namespace aurora::vi

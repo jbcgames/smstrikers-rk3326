@@ -2,7 +2,6 @@
 #include "__gx.h"
 
 #include "../../gfx/texture.hpp"
-#include "../../gx/texture.hpp"
 #include "dolphin/gx/GXAurora.h"
 
 #include <algorithm>
@@ -135,8 +134,6 @@ void GXInitTexObjLOD(GXTexObj* obj_, GXTexFilter minFilt, GXTexFilter magFilt, f
   const auto clampedMax = std::clamp(maxLod, 0.0f, 10.0f);
   SET_REG_FIELD(0, obj->mode1, 8, 0, static_cast<u8>(16.0f * clampedMin));
   SET_REG_FIELD(0, obj->mode1, 8, 8, static_cast<u8>(16.0f * clampedMax));
-  // smstrikers-port: the object is complete once its LOD range is set, so conversion can start here.
-  aurora::gx::texture::preconvert_texture(*obj);
 }
 
 void GXInitTexObjData(GXTexObj* obj_, const void* data) {

@@ -9,12 +9,22 @@
 [![Download for Linux arm64](https://img.shields.io/badge/Linux_arm64-FCC624?style=for-the-badge)](https://github.com/new-coke/strikers/releases/latest/download/strikers-linux-arm64.tar.gz)
 [![Download for Steam Deck](https://img.shields.io/badge/Steam_Deck-1A9FFF?style=for-the-badge)](https://github.com/new-coke/strikers/releases/latest/download/strikers-linux-x86_64.tar.gz)
 [![Download for Nintendo Switch](https://img.shields.io/badge/Nintendo_Switch-E60012?style=for-the-badge)](https://github.com/new-coke/strikers/releases/latest/download/strikers-switch.zip)
+[![PortMaster RK3326](https://img.shields.io/badge/PortMaster-RK3326_Mali--G31-brightgreen?style=for-the-badge)](#-rockchip-rk3326--portmaster-support)
 
 *Requires game data from your own copy of Super Mario Strikers. No game assets are included.*
 
-Super Mario Strikers, rebuilt to run natively on Windows, Linux, macOS and Nintendo Switch, with modern display support, configurable controls and a focus on performance across both powerful and low-power hardware.
+Super Mario Strikers, rebuilt to run natively on Windows, Linux, macOS, Nintendo Switch, and **Rockchip RK3326 handhelds (ArkOS / PortMaster)** with modern display support, configurable controls and a focus on performance across both powerful and low-power hardware.
 
 Built on the community decompilation by the excellent [Yannick Suter](https://github.com/yannicksuter), this project brings the original game to modern systems while preserving the original gameplay and visual style.
+
+## 🕹️ Rockchip RK3326 / PortMaster Support
+
+This fork includes full native support for **Rockchip RK3326 (Mali-G31 MP2 GPU, ArkOS / PortMaster)**:
+- **Native OpenGL ES 3.0 Backend:** Eliminates Dawn and WebGPU, featuring runtime GLSL ES 3.0 shader compilation and binary program caching (`glProgramBinary`).
+- **Full Player Skinning:** Support for 13 position/normal matrix rows (`MaxPnMtx = 13`) in XF memory.
+- **KMSDRM Direct Presentation:** Zero-copy display scanout via the SDL3-over-SDL2 shim against ARM Mali Bifrost blobs.
+- **PortMaster Package:** Ready-to-use launcher scripts, game controller hotkeys (Select+Start exit), and auto-tuning governors in `smstrikers-port/portmaster/`.
+- Detailed compilation and installation guide available in [smstrikers-port/README.md](smstrikers-port/README.md).
 
 ## Features
 

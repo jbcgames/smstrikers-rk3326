@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.hpp"
 #include "texture.hpp"
 #include "../webgpu/gpu.hpp"
 
@@ -22,28 +23,25 @@ inline bool uses_direct_texture_upload(u32 gxFormat) noexcept {
   }
 }
 
-inline wgpu::TextureFormat to_wgpu(u32 gxFormat) noexcept {
+inline gl::TextureFormat to_gl(u32 gxFormat) noexcept {
   switch (gxFormat) {
   case GX_TF_R8_PC:
-    return uses_direct_texture_upload(gxFormat) ? wgpu::TextureFormat::R8Unorm : wgpu::TextureFormat::RGBA8Unorm;
+    return uses_direct_texture_upload(gxFormat) ? gl::TextureFormat::R8Unorm : gl::TextureFormat::RGBA8Unorm;
   case GX_TF_RG8_PC:
-    return uses_direct_texture_upload(gxFormat) ? wgpu::TextureFormat::RG8Unorm : wgpu::TextureFormat::RGBA8Unorm;
+    return uses_direct_texture_upload(gxFormat) ? gl::TextureFormat::RG8Unorm : gl::TextureFormat::RGBA8Unorm;
   case GX_TF_C4:
   case GX_TF_C8:
   case GX_TF_C14X2:
-    return wgpu::TextureFormat::R16Sint;
+    return gl::TextureFormat::R16Sint;
   case GX_TF_BC1_PC:
-    return uses_direct_texture_upload(gxFormat) ? wgpu::TextureFormat::BC1RGBAUnorm : wgpu::TextureFormat::RGBA8Unorm;
+    return uses_direct_texture_upload(gxFormat) ? gl::TextureFormat::BC1RGBAUnorm : gl::TextureFormat::RGBA8Unorm;
   default:
-    return wgpu::TextureFormat::RGBA8Unorm;
+    return gl::TextureFormat::RGBA8Unorm;
   }
 }
 
-// smstrikers-port: true if this CMPR texture uploads as BC1 instead of RGBA8.
-bool cmpr_uses_bc1(uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) noexcept;
-
 struct ConvertedTexture {
-  wgpu::TextureFormat format;
+  gl::TextureFormat format;
   uint32_t width;
   uint32_t height;
   uint32_t mips = 1;
@@ -60,7 +58,4 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
                                          ArrayRef<uint8_t> tlutData);
 ConvertedTexture convert_tlut(u32 format, uint32_t width, ArrayRef<uint8_t> data);
 GXTexFmt tlut_texture_format(GXTlutFmt format) noexcept;
-// smstrikers-port: the base level as RGBA8 whatever it uploads as, for texture dumps; not counted in the texture stats.
-ByteBuffer decode_rgba8(u32 format, uint32_t width, uint32_t height, ArrayRef<uint8_t> data, GXTlutFmt tlutFormat,
-                        uint16_t tlutEntries, ArrayRef<uint8_t> tlutData);
 } // namespace aurora::gfx

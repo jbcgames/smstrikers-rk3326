@@ -1,17 +1,18 @@
 #pragma once
 
 #include "aurora/aurora.h"
+#include "gfx/common.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <SDL3/SDL_events.h>
 #include <aurora/rmlui.hpp>
-#include <dawn/webgpu_cpp.h>
 
 namespace aurora::rmlui {
 
 struct RecordedFrame {
-  wgpu::BindGroup bindGroup;
-  bool overlay = false;
+  gl::Texture texture;   // the composited UI target sampled by the present overlay (id 0 = nothing recorded)
+  gl::Sampler sampler;   // its filtering sampler
+  bool overlay = false;  // true = blend the UI over the scene; false = UI already seeded the scene (opaque)
 };
 
 void initialize(const AuroraWindowSize& size) noexcept;

@@ -2,16 +2,17 @@
 #include "__gx.h"
 #include "../../gx/fifo.hpp"
 
-namespace {
 // Track vertex count between GXBegin/GXEnd for mismatch detection
-u16 sBeginNVerts = 0;
-u32 sBeginFifoSize = 0;
-bool sInBegin = false;
+static u16 sBeginNVerts = 0;
+static u32 sBeginFifoSize = 0;
+static bool sInBegin = false;
 // GX_AUTO: offset of the u32 byte-length placeholder to patch in GXEnd
-u32 sBeginSizeOffset = 0;
-bool sBeginAuto = false;
+static u32 sBeginSizeOffset = 0;
+static bool sBeginAuto = false;
 
-void pre_begin() {
+extern "C" {
+
+void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
   CHECK(!sInBegin, "GXBegin: called without matching GXEnd");
 
   // Flush dirty state before starting a draw
@@ -23,24 +24,11 @@ void pre_begin() {
   if (*reinterpret_cast<u32*>(&__gx->vNum) != 0) {
     __GXSendFlushPrim();
   }
-}
-
-void post_begin(u16 nVerts) {
-  sBeginNVerts = nVerts;
-  sBeginFifoSize = aurora::gx::fifo::get_buffer_size();
-  sInBegin = true;
-}
-} // namespace
-
-extern "C" {
-
-void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
-  pre_begin();
 
   const u8 drawCmd = static_cast<u8>(vtxFmt) | static_cast<u8>(primitive);
   sBeginAuto = nVerts == GX_AUTO;
   if (sBeginAuto) {
-    AURORA_ASSERT(!aurora::gx::fifo::in_display_list(), "GXBegin: GX_AUTO not supported in display lists");
+    ASSERT(!aurora::gx::fifo::in_display_list(), "GXBegin: GX_AUTO not supported in display lists");
     GX_WRITE_AURORA(GX_AURORA_DRAW_SIZED);
     GX_WRITE_U8(drawCmd);
     sBeginSizeOffset = aurora::gx::fifo::get_buffer_size();
@@ -50,27 +38,10 @@ void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
     GX_WRITE_U16(nVerts);
   }
 
-  post_begin(nVerts);
-}
-
-void GXBeginIndexed(GXVtxFmt vtxFmt, u16 nVerts, const u16* indices, u32 nIndices) {
-  pre_begin();
-  AURORA_ASSERT(nVerts != 0, "GXBeginIndexed: vertex count must be nonzero");
-  AURORA_ASSERT(indices != nullptr, "GXBeginIndexed: indices must not be null");
-  AURORA_ASSERT(nIndices != 0, "GXBeginIndexed: index count must be nonzero");
-  AURORA_ASSERT(nIndices % 3 == 0, "GXBeginIndexed: index count must describe whole triangles");
-  AURORA_ASSERT(nIndices <= UINT32_MAX / sizeof(u16), "GXBeginIndexed: index data size overflow");
-
-  sBeginAuto = false;
-  GX_WRITE_AURORA(GX_AURORA_DRAW_INDEXED);
-  GX_WRITE_U8(static_cast<u8>(vtxFmt) | static_cast<u8>(GX_TRIANGLES));
-  GX_WRITE_U16(nVerts);
-  GX_WRITE_U32(nIndices);
-
-  // Indices are host-endian even in a big-endian FIFO
-  aurora::gx::fifo::write_data(indices, nIndices * sizeof(u16));
-
-  post_begin(nVerts);
+  // Record state for vertex count validation in GXEnd
+  sBeginNVerts = nVerts;
+  sBeginFifoSize = aurora::gx::fifo::get_buffer_size();
+  sInBegin = true;
 }
 
 void GXEnd() {
@@ -80,15 +51,23 @@ void GXEnd() {
       aurora::gx::fifo::patch_u32(sBeginSizeOffset, bytesWritten);
       sBeginAuto = false;
     } else if (sBeginNVerts > 0 && bytesWritten > 0) {
-      // We don't know the vertex size without processing the FIFO for vtxFmt changes
-      // so this is just a best-effort check to find obvious issues
-      if (bytesWritten % sBeginNVerts != 0) {
+      u32 vtxSize = bytesWritten / sBeginNVerts;
+      u32 remainder = bytesWritten % sBeginNVerts;
+      if (remainder != 0) {
         Log.warn("GXEnd: vertex data not evenly divisible: {} bytes for {} vertices", bytesWritten, sBeginNVerts);
       }
+      u32 actualVerts = (vtxSize > 0) ? bytesWritten / vtxSize : 0;
+      CHECK(actualVerts == sBeginNVerts,
+            "GXEnd: vertex count mismatch: GXBegin declared {} vertices ({}B each, {}B total) "
+            "but {} bytes were written ({} vertices)",
+            sBeginNVerts, vtxSize, sBeginNVerts * vtxSize, bytesWritten, actualVerts);
     }
     sInBegin = false;
-    aurora::gx::fifo::finish_draw();
   }
+  // TEMP: debugging aid
+  // if (!aurora::gx::fifo::in_display_list()) {
+  //   aurora::gx::fifo::drain();
+  // }
 }
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {

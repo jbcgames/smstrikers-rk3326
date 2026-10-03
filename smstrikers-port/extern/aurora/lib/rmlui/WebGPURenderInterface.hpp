@@ -2,7 +2,6 @@
 #include <array>
 #include <vector>
 
-#include <dawn/webgpu_cpp.h>
 
 #include "../gfx/clear.hpp"
 #include "RmlUi/Core/RenderInterface.h"
@@ -89,7 +88,10 @@ enum class BaseLayerContent {
 
 class WebGPURenderInterface : public Rml::RenderInterface {
 public:
-  static constexpr wgpu::TextureFormat ClipMaskStencilFormat = wgpu::TextureFormat::Stencil8;
+  // Combined depth-stencil rather than standalone Stencil8: a stencil-only texture maps to
+  // GL_STENCIL_INDEX8, which needs GL_OES_texture_stencil8 (ES 3.2) and is absent on older GLES
+  // blobs (e.g. some PowerVR). GL_DEPTH24_STENCIL8 is core ES 3.0. The depth aspect goes unused.
+  static constexpr gl::TextureFormat ClipMaskStencilFormat = gl::TextureFormat::Depth24PlusStencil8;
 
   enum class PipelineType {
     Normal,
@@ -109,20 +111,20 @@ public:
 
 private:
   struct RenderTarget {
-    wgpu::Texture texture;
-    wgpu::TextureView view;
-    wgpu::Texture multisampleTexture;
-    wgpu::TextureView multisampleView;
-    wgpu::Extent3D size;
+    gl::Texture texture;
+    gl::Texture view;
+    gl::Texture multisampleTexture;
+    gl::Texture multisampleView;
+    gl::Extent3D size;
   };
 
-  wgpu::TextureView m_frameSeedView;
+  gl::Texture m_frameSeedView;
 
-  wgpu::TextureFormat m_renderTargetFormat = wgpu::TextureFormat::Undefined;
-  wgpu::Texture m_clipMaskStencilTexture;
-  wgpu::TextureView m_clipMaskStencilView;
-  wgpu::Extent3D m_clipMaskStencilSize{};
-  wgpu::Extent3D m_frameSize{};
+  gl::TextureFormat m_renderTargetFormat = gl::TextureFormat::Undefined;
+  gl::Texture m_clipMaskStencilTexture;
+  gl::Texture m_clipMaskStencilView;
+  gl::Extent3D m_clipMaskStencilSize{};
+  gl::Extent3D m_frameSize{};
   gfx::Viewport m_viewport{};
 
   Rml::TextureHandle m_nullTexture = 0;
@@ -150,15 +152,15 @@ private:
 
   gfx::Range SetupRenderState(const Rml::Vector2f& translation);
 
-  void EnsureRenderTarget(RenderTarget& target, const char* label, const wgpu::Extent3D& size,
+  void EnsureRenderTarget(RenderTarget& target, const char* label, const gl::Extent3D& size,
                           bool multisampled = false);
-  void EnsureFrameTargets(const wgpu::Extent3D& size);
+  void EnsureFrameTargets(const gl::Extent3D& size);
   Rml::Rectanglei GetActiveScissorRegion() const;
   TexCoordLimits GetPostprocessTexCoordLimits() const;
   TexCoordLimits GetPostprocessTexCoordLimits(Rml::Rectanglei region) const;
-  void BeginRenderTargetPass(const wgpu::TextureView& view, wgpu::LoadOp loadOp, const char* label,
+  void BeginRenderTargetPass(const gl::Texture& view, gl::LoadOp loadOp, const char* label,
                              bool clearStencil = false);
-  void BeginLayerPass(Rml::LayerHandle layer, wgpu::LoadOp loadOp, const char* label, bool clearStencil = false,
+  void BeginLayerPass(Rml::LayerHandle layer, gl::LoadOp loadOp, const char* label, bool clearStencil = false,
                       bool resolveMultisampled = true);
   void EnsureFrameRenderingStarted();
   void EnsureActiveLayerPass(const char* label);
@@ -175,7 +177,7 @@ private:
                              gfx::BindGroupRef extraBindGroup = 0, gfx::Range extraUniformRange = {},
                              bool extraBindGroupHasDynamicOffset = true, std::array<float, 4> blendConstant = {},
                              bool hasBlendConstant = false);
-  void CompositeToTarget(gfx::BindGroupRef bindGroup, const wgpu::TextureView& view, wgpu::LoadOp loadOp,
+  void CompositeToTarget(gfx::BindGroupRef bindGroup, const gl::Texture& view, gl::LoadOp loadOp,
                          gfx::PipelineRef pipeline, const char* label, gfx::BindGroupRef extraBindGroup = 0,
                          gfx::Range extraUniformRange = {}, bool extraBindGroupHasDynamicOffset = true,
                          std::array<float, 4> blendConstant = {}, bool hasBlendConstant = false);
@@ -214,8 +216,8 @@ public:
                   BaseLayerContent baseLayerContent);
   bool EndFrame();
   void SetWindowSize(const Rml::Vector2i& window_size) { m_windowSize = window_size; }
-  void SetRenderTargetFormat(wgpu::TextureFormat render_target_format) { m_renderTargetFormat = render_target_format; }
-  wgpu::TextureView GetClipMaskStencilView(const wgpu::Extent3D& size);
+  void SetRenderTargetFormat(gl::TextureFormat render_target_format) { m_renderTargetFormat = render_target_format; }
+  gl::Texture GetClipMaskStencilView(const gl::Extent3D& size);
 
   void CreateDeviceObjects();
 
