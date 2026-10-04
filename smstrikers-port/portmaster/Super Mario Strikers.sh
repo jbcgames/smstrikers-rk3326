@@ -1,6 +1,7 @@
 #!/bin/bash
 # PortMaster Launch Script for Super Mario Strikers
 # Target: RK3326 / Mali-G31 MP2 / OpenGL ES 3.0 / KMSDRM
+# Port By JBCGAMES
 
 # Pre-kill any stale instances to ensure DRM master is completely free
 sudo killall -9 strikers gptokeyb gptokeyb2 2>/dev/null || true
