@@ -510,6 +510,8 @@ long MemCard::WriteFileIconData(MemCard::MC_FILE* pFile, void* pData, const MemC
     CARDSetIconAnim(&stat, pFile->IconCfg.IconAnimType);
 
     m_CB[8] = functor;
+    m_pFileCB = pFile;
+    m_pDataCB = pData;
 
     m_State = IS_WRITINGSTATUS;
     m_CardState = CS_WRITING;
@@ -522,11 +524,8 @@ long MemCard::WriteFileIconData(MemCard::MC_FILE* pFile, void* pData, const MemC
     {
         m_State = IS_MOUNTED;
         m_CardState = CS_MOUNTED;
-    }
-    else
-    {
-        m_pFileCB = pFile;
-        m_pDataCB = pData;
+        m_pFileCB = NULL;
+        m_pDataCB = NULL;
     }
 
     return result;
@@ -731,7 +730,7 @@ void MemCard::SetStatusDone(long Result)
     if (Result == 0)
     {
         m_State = IS_MOUNTED;
-        long Result = InternalWriteFile(m_pFileCB, m_pDataCB, m_pFileCB->TotalHeaderSize, 0, m_CB[8], false);
+        Result = InternalWriteFile(m_pFileCB, m_pDataCB, m_pFileCB->TotalHeaderSize, 0, m_CB[8], false);
         if (Result != 0)
         {
             m_State = IS_MOUNTED;
