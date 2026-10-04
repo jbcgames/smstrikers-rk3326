@@ -625,16 +625,20 @@ static void pipeline_cache_abort() {
 static bool write_pipeline_cache_record(const PipelineCacheWrite& write);
 
 static std::string pipeline_cache_seed_path() {
-  if (g_config.resourcesPath == nullptr || g_config.resourcesPath[0] == '\0') {
-    return InitialPipelineCacheName;
+  if (g_config.resourcesPath != nullptr && g_config.resourcesPath[0] != '\0') {
+    std::string path{g_config.resourcesPath};
+    if (path.back() != '/' && path.back() != '\\') {
+      path += '/';
+    }
+    path += InitialPipelineCacheName;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f != nullptr) {
+      fclose(f);
+      return path;
+    }
   }
 
-  std::string path{g_config.resourcesPath};
-  if (path.back() != '/' && path.back() != '\\') {
-    path += '/';
-  }
-  path += InitialPipelineCacheName;
-  return path;
+  return InitialPipelineCacheName;
 }
 
 static sqlite3* open_pipeline_cache_seed_db(const std::string& path) {

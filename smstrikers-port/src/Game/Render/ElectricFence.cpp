@@ -18,6 +18,8 @@
 #include "NL/nlTask.h"
 
 #include <math.h>
+#include <cstdlib>
+#include <cstring>
 
 static float sfGridTextureSize = 7.0f;
 static float sfNumGridSquares = 16.0f;
@@ -30,6 +32,36 @@ static int sNumRevolutionsToDisplay = 2;
 static float sfAngleRandomOffset = 10.0f;
 static float sfStartAngle = 180.0f;
 static bool sbUseSparksDuringElectricFenceFlyBy = true;
+
+static bool GetUseSparksDuringElectricFenceFlyBy()
+{
+    static int s_sparks = -1;
+    if (s_sparks < 0)
+    {
+        const char* e = getenv("STRIKERS_FENCE_SPARKS");
+        s_sparks = (e != nullptr && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    return s_sparks != 0;
+}
+
+static float GetTimeBetweenFenceEffects()
+{
+    static float s_time = -1.0f;
+    if (s_time < 0.0f)
+    {
+        const char* e = getenv("STRIKERS_FENCE_RATE");
+        if (e != nullptr && e[0] != '\0')
+        {
+            float val = (float)atof(e);
+            s_time = (val > 0.005f) ? val : 0.06f;
+        }
+        else
+        {
+            s_time = 0.06f;
+        }
+    }
+    return s_time;
+}
 
 const unsigned long UnlitProgram = glGetProgram("3d unlit");
 const unsigned long LitProgram = glGetProgram("3d pointlit");
@@ -611,7 +643,8 @@ void UpdateElectricFence(float fDeltaT)
         timeSinceLastEffect = 0.0f;
         init2 = 1;
     }
-    while (timeSinceLastEffect > sfTimeBetweenEffects)
+    float timeBetween = GetTimeBetweenFenceEffects();
+    while (timeSinceLastEffect > timeBetween)
     {
         float goalLineX = cField::GetGoalLineX(1U);
         float sideLineY = cField::GetSidelineY(1U);
@@ -671,8 +704,8 @@ void UpdateElectricFence(float fDeltaT)
                 pos.z = nlRandomf(netHeight, 5.0f, &nlDefaultSeed);
             }
         }
-        EmitElectricFenceBallEffect(pos, normal, counter++, !sbUseSparksDuringElectricFenceFlyBy);
-        timeSinceLastEffect = timeSinceLastEffect - sfTimeBetweenEffects;
+        EmitElectricFenceBallEffect(pos, normal, counter++, !GetUseSparksDuringElectricFenceFlyBy());
+        timeSinceLastEffect = timeSinceLastEffect - timeBetween;
     }
     timeSinceLastEffect = timeSinceLastEffect + fDeltaT;
     sfElectricFenceDisplayAngle = sfElectricFenceDisplayAngle + sfAngleAnimationRate * fDeltaT;

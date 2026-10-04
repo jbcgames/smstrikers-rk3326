@@ -1243,17 +1243,15 @@ void DoTranslucency(DrawableObject* pObject)
 
     if (objectCreationFlags & 0x2000)
     {
-        if (inGameplayCamera)
+        static int s_cullExtra2 = -1;
+        if (s_cullExtra2 < 0)
+        {
+            const char* e = getenv("STRIKERS_CULL_EXTRA_MODELS");
+            s_cullExtra2 = (e != nullptr && strcmp(e, "0") == 0) ? 0 : 1;
+        }
+        if (inGameplayCamera || s_cullExtra2)
         {
             pObject->m_translucency = 0.0f;
-            if (pObject->m_translucency < 0.0f)
-            {
-                pObject->m_translucency = 0.0f;
-            }
-            if (pObject->m_translucency > 1.0f)
-            {
-                pObject->m_translucency = 1.0f;
-            }
             return;
         }
 
