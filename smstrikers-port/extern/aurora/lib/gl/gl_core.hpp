@@ -482,6 +482,9 @@ struct GlProcTable {
 // The one global proc table. Filled by gl::load(); read everywhere via `gl`.
 extern GlProcTable gl;
 
+// Resolve an entry point through getProc, eglGetProcAddress, or libGLESv2/libEGL dlsym.
+void* resolve(ProcAddressFn getProc, const char* name);
+
 // Resolve every entry point in `gl` through `getProc` (with a libGLESv2/libEGL
 // dlsym fallback for symbols the shim getProc refuses, mirroring
 // gpu.cpp's sdl2shim_egl_get_proc). Returns false if a REQUIRED core entry point

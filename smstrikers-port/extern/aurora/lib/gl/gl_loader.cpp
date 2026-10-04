@@ -12,6 +12,9 @@ bool g_loaded = false;
 void* g_libGLESv2 = nullptr;
 void* g_libEGL = nullptr;
 
+using EglGetProcAddressFn = void* (*)(const char*);
+EglGetProcAddressFn g_eglGetProcAddress = nullptr;
+
 void* dlsym_lib(void*& handle, const char* const* names, const char* sym) {
   if (handle == nullptr) {
     for (const char* const* n = names; *n != nullptr; ++n) {
@@ -23,25 +26,32 @@ void* dlsym_lib(void*& handle, const char* const* names, const char* sym) {
   }
   return handle != nullptr ? dlsym(handle, sym) : nullptr;
 }
+} // namespace
 
 // Resolution chain, mirroring gpu.cpp's sdl2shim_egl_get_proc: the shim's own
-// getProc first; then a direct dlsym against libGLESv2 / libEGL for the symbols
-// some blobs' eglGetProcAddress refuses (notably core EGL entry points on
-// PowerVR pre-EGL-1.5).
+// getProc first; then eglGetProcAddress for extensions; then direct dlsym against
+// libGLESv2 / libEGL for core symbols that eglGetProcAddress refuses.
 void* resolve(ProcAddressFn getProc, const char* name) {
   if (getProc != nullptr) {
     if (void* p = getProc(name)) {
       return p;
     }
   }
+  static const char* const kEgl[] = {"libEGL.so.1", "libEGL.so", "libmali.so", "libMali.so", nullptr};
+  if (g_eglGetProcAddress == nullptr) {
+    g_eglGetProcAddress = reinterpret_cast<EglGetProcAddressFn>(dlsym_lib(g_libEGL, kEgl, "eglGetProcAddress"));
+  }
+  if (g_eglGetProcAddress != nullptr) {
+    if (void* p = g_eglGetProcAddress(name)) {
+      return p;
+    }
+  }
   static const char* const kGles[] = {"libGLESv2.so", "libGLESv2.so.2", nullptr};
-  static const char* const kEgl[] = {"libEGL.so", "libEGL.so.1", nullptr};
   if (void* p = dlsym_lib(g_libGLESv2, kGles, name)) {
     return p;
   }
   return dlsym_lib(g_libEGL, kEgl, name);
 }
-} // namespace
 
 GlProcTable gl;
 

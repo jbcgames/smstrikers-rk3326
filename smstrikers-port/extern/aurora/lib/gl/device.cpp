@@ -160,13 +160,19 @@ bool initialize(AuroraBackend backend, bool allowCpu) {
       getProc = reinterpret_cast<gl::ProcAddressFn>(SDL_GL_GetProcAddress);
     }
     if (eglDisplay == nullptr || eglContext == nullptr) {
-      auto* pGetCurrentDisplay = reinterpret_cast<gl::EGLDisplay (*)()>(getProc("eglGetCurrentDisplay"));
-      auto* pGetCurrentContext = reinterpret_cast<gl::EGLContext (*)()>(getProc("eglGetCurrentContext"));
+      auto* pGetCurrentDisplay = reinterpret_cast<gl::EGLDisplay (*)()>(gl::resolve(getProc, "eglGetCurrentDisplay"));
+      auto* pGetCurrentContext = reinterpret_cast<gl::EGLContext (*)()>(gl::resolve(getProc, "eglGetCurrentContext"));
       if (pGetCurrentDisplay != nullptr && eglDisplay == nullptr) {
         eglDisplay = pGetCurrentDisplay();
       }
       if (pGetCurrentContext != nullptr && eglContext == nullptr) {
         eglContext = pGetCurrentContext();
+      }
+      if (eglDisplay == nullptr) {
+        auto* pGetDisplay = reinterpret_cast<gl::EGLDisplay (*)(void*)>(gl::resolve(getProc, "eglGetDisplay"));
+        if (pGetDisplay != nullptr) {
+          eglDisplay = pGetDisplay((void*)0 /* EGL_DEFAULT_DISPLAY */);
+        }
       }
     }
     if (eglDisplay == nullptr || getProc == nullptr) {
