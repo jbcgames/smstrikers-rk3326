@@ -9,7 +9,16 @@
 #include <cstdint>
 #include <type_traits>
 #include <vector>
-#include <cstring>
+#include <bit>
+
+namespace std {
+#if !defined(__cpp_lib_bit_cast)
+template <typename To, typename From>
+constexpr To bit_cast(const From& src) noexcept {
+  return __builtin_bit_cast(To, src);
+}
+#endif
+}
 
 using namespace std::string_view_literals;
 
