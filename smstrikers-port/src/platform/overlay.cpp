@@ -1855,6 +1855,52 @@ void queue_scripted_commands(unsigned long frame)
     }
 }
 
+static void ShowPipelineProgress()
+{
+    static int s_showPipelines = -1;
+    if (s_showPipelines < 0)
+    {
+        const char* e = getenv("STRIKERS_SHOW_PIPELINES");
+        s_showPipelines = (e != nullptr && *e == '0') ? 0 : 1;
+    }
+    if (!s_showPipelines)
+        return;
+
+    uint32_t queued = 0;
+    uint32_t created = 0;
+    aurora_get_pipeline_counts(&queued, &created);
+    if (queued == 0)
+        return;
+
+    const uint32_t total = queued + created;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
+        return;
+
+    const float halfWidth = io.DisplaySize.x * 0.5f;
+    const float boxWidth = (io.DisplaySize.x > 400.0f) ? 360.0f : io.DisplaySize.x * 0.88f;
+
+    ImGui::SetNextWindowPos(ImVec2(halfWidth, 12.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(boxWidth, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.75f);
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize;
+
+    if (ImGui::Begin("##PipelineProgress", nullptr, flags))
+    {
+        const float percent = total > 0 ? (float)created / (float)total : 0.0f;
+        char progressStr[64];
+        std::snprintf(progressStr, sizeof(progressStr), "Processing pipelines: %u / %u", (unsigned)created, (unsigned)total);
+        const ImVec2 textSize = ImGui::CalcTextSize(progressStr);
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - textSize.x) * 0.5f);
+        ImGui::TextUnformatted(progressStr);
+        ImGui::ProgressBar(percent, ImVec2(-1.0f, 0.0f));
+    }
+    ImGui::End();
+}
+
 }   // namespace
 
 void PortOverlayDraw(void)
@@ -1868,6 +1914,10 @@ void PortOverlayDraw(void)
     // STRIKERS_CONTROL, polled here because this runs every frame before the STRIKERS_OVERLAY test
     // and inside Aurora's frame, which is where shot has to ask for its readback.
     PortControlPoll();
+
+    // Visual pipeline compilation indicator (Dusklight methodology)
+    ShowPipelineProgress();
+
     const bool menu = s_menuOpen;
     if (!menu && !s_enabled)
         return;

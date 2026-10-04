@@ -298,14 +298,65 @@ extern "C" void PortAuroraConfigure(AuroraConfig* cfg)
         }
     }
 
-#if defined(__SWITCH__)
-    // Set at startup when the .nro carries the shader seeds in its romfs.
+    // Shader pipeline seeds and initial cache path (Dusklight methodology).
     {
+        static char s_resourcesDir[512] = {0};
         const char* dir = getenv("STRIKERS_RESOURCES_DIR");
+        if (dir == NULL || *dir == '\0')
+            dir = getenv("GAMEDIR");
+        if (dir == NULL || *dir == '\0')
+            dir = getenv("STRIKERS_DATA");
         if (dir != NULL && *dir != '\0')
-            cfg->resourcesPath = dir;
+        {
+            snprintf(s_resourcesDir, sizeof(s_resourcesDir), "%s", dir);
+            cfg->resourcesPath = s_resourcesDir;
+            fprintf(stderr, "[port] resources dir for pipeline cache: %s\n", s_resourcesDir);
+        }
     }
-#endif
+
+    // If local pipeline_cache.db doesn't exist yet, seed it from initial_pipeline_cache.db
+    if (cfg->cachePath != NULL && *cfg->cachePath != '\0')
+    {
+        char targetFile[512];
+        snprintf(targetFile, sizeof(targetFile), "%s/pipeline_cache.db", cfg->cachePath);
+        FILE* testTarget = fopen(targetFile, "rb");
+        if (testTarget != NULL)
+        {
+            fclose(testTarget);
+        }
+        else
+        {
+            char sourceFile[512] = {0};
+            if (cfg->resourcesPath != NULL && *cfg->resourcesPath != '\0')
+                snprintf(sourceFile, sizeof(sourceFile), "%s/initial_pipeline_cache.db", cfg->resourcesPath);
+            else
+                snprintf(sourceFile, sizeof(sourceFile), "initial_pipeline_cache.db");
+
+            FILE* src = fopen(sourceFile, "rb");
+            if (src == NULL && cfg->resourcesPath != NULL)
+            {
+                snprintf(sourceFile, sizeof(sourceFile), "initial_pipeline_cache.db");
+                src = fopen(sourceFile, "rb");
+            }
+            if (src != NULL)
+            {
+                FILE* dst = fopen(targetFile, "wb");
+                if (dst != NULL)
+                {
+                    char buf[64 * 1024];
+                    size_t n;
+                    while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
+                    {
+                        if (fwrite(buf, 1, n, dst) != n)
+                            break;
+                    }
+                    fclose(dst);
+                    fprintf(stderr, "[port] Seeded pipeline cache from '%s' to '%s'\n", sourceFile, targetFile);
+                }
+                fclose(src);
+            }
+        }
+    }
 
     BuildIcon();
     cfg->iconRGBA8 = g_icon;
