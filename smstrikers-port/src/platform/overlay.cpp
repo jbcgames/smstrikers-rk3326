@@ -1861,28 +1861,98 @@ static void ShowPipelineProgress()
     if (s_showPipelines < 0)
     {
         const char* e = getenv("STRIKERS_SHOW_PIPELINES");
-        s_showPipelines = (e != nullptr && *e == '0') ? 0 : 1;
+        if (e != nullptr)
+        {
+            if (std::strcmp(e, "0") == 0)
+                s_showPipelines = 0;
+            else if (std::strcmp(e, "always") == 0 || std::strcmp(e, "2") == 0)
+                s_showPipelines = 2;
+            else
+                s_showPipelines = 1;
+        }
+        else
+        {
+            s_showPipelines = 1;
+        }
     }
     if (!s_showPipelines)
+        return;
+
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
         return;
 
     uint32_t queued = 0;
     uint32_t created = 0;
     aurora_get_pipeline_counts(&queued, &created);
-    if (queued == 0)
-        return;
 
-    const uint32_t total = queued + created;
-    const ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x <= 0.0f || io.DisplaySize.y <= 0.0f)
+    // Initial countdown for boot (show at startup for ~5.0s so the user can verify pipelines)
+    static float s_displayTimer = 5.0f;
+    static uint32_t s_maxTotal = 0;
+    static bool s_wasCompiling = false;
+    static bool s_loggedShow = false;
+
+    const float dt = (io.DeltaTime > 0.0f && io.DeltaTime < 0.2f) ? io.DeltaTime : 0.0166f;
+
+    if (queued > 0)
+    {
+        s_wasCompiling = true;
+        s_displayTimer = 3.5f; // Keep showing and hold for 3.5s after finishing
+        if (queued + created > s_maxTotal)
+            s_maxTotal = queued + created;
+    }
+    else
+    {
+        if (s_wasCompiling)
+        {
+            s_wasCompiling = false;
+            s_displayTimer = 3.5f; // Hold completed state for 3.5s
+        }
+        else if (s_displayTimer > 0.0f)
+        {
+            s_displayTimer -= dt;
+        }
+    }
+
+    if (s_maxTotal < queued + created)
+        s_maxTotal = queued + created;
+    if (s_maxTotal < created)
+        s_maxTotal = created;
+
+    const bool shouldShow = (s_showPipelines == 2) || (queued > 0) || (s_displayTimer > 0.0f);
+    if (!shouldShow)
+    {
+        if (s_loggedShow)
+        {
+            std::fprintf(stderr, "[overlay] Pipeline progress overlay dismissed (total %u pipelines)\n", (unsigned)created);
+            s_loggedShow = false;
+        }
         return;
+    }
+
+    if (!s_loggedShow)
+    {
+        std::fprintf(stderr, "[overlay] Pipeline progress overlay active (queued=%u, created=%u, total=%u)\n",
+                     (unsigned)queued, (unsigned)created, (unsigned)s_maxTotal);
+        s_loggedShow = true;
+    }
+
+    const uint32_t total = s_maxTotal > 0 ? s_maxTotal : (queued + created);
+    const bool isReady = (queued == 0);
+    const float percent = total > 0 ? (float)created / (float)total : (isReady ? 1.0f : 0.0f);
 
     const float halfWidth = io.DisplaySize.x * 0.5f;
-    const float boxWidth = (io.DisplaySize.x > 400.0f) ? 360.0f : io.DisplaySize.x * 0.88f;
+    const float boxWidth = (io.DisplaySize.x > 450.0f) ? 380.0f : io.DisplaySize.x * 0.88f;
 
-    ImGui::SetNextWindowPos(ImVec2(halfWidth, 12.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowPos(ImVec2(halfWidth, 14.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(boxWidth, 0.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.75f);
+    ImGui::SetNextWindowBgAlpha(0.88f);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.09f, 0.13f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_Border, isReady ? ImVec4(0.20f, 0.82f, 0.40f, 0.80f) : ImVec4(0.25f, 0.65f, 1.00f, 0.80f));
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
@@ -1890,15 +1960,37 @@ static void ShowPipelineProgress()
 
     if (ImGui::Begin("##PipelineProgress", nullptr, flags))
     {
-        const float percent = total > 0 ? (float)created / (float)total : 0.0f;
-        char progressStr[64];
-        std::snprintf(progressStr, sizeof(progressStr), "Processing pipelines: %u / %u", (unsigned)created, (unsigned)total);
+        char progressStr[80];
+        if (isReady)
+        {
+            std::snprintf(progressStr, sizeof(progressStr), "Pipelines ready: %u / %u", (unsigned)created, (unsigned)total);
+        }
+        else
+        {
+            std::snprintf(progressStr, sizeof(progressStr), "Processing pipelines: %u / %u (%.0f%%)",
+                          (unsigned)created, (unsigned)total, (double)(percent * 100.0f));
+        }
+
         const ImVec2 textSize = ImGui::CalcTextSize(progressStr);
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - textSize.x) * 0.5f);
-        ImGui::TextUnformatted(progressStr);
-        ImGui::ProgressBar(percent, ImVec2(-1.0f, 0.0f));
+        if (isReady)
+            ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.50f, 1.0f), "%s", progressStr);
+        else
+            ImGui::TextColored(ImVec4(0.40f, 0.80f, 1.00f, 1.0f), "%s", progressStr);
+
+        ImGui::Spacing();
+        if (isReady)
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.18f, 0.82f, 0.38f, 1.0f));
+        else
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.22f, 0.62f, 0.98f, 1.0f));
+
+        ImGui::ProgressBar(percent, ImVec2(-1.0f, 12.0f), "");
+        ImGui::PopStyleColor();
     }
     ImGui::End();
+
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
 }
 
 }   // namespace
