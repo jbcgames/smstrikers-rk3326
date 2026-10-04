@@ -11,8 +11,10 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame) { (void)frame; }
 
 #else
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_gamepad.h>
@@ -464,24 +466,69 @@ void apply_gamepad(u32 port, bool report)
         PADSetButtonMapping(port, m);
     }
 
-    // Sticks are not remappable beyond the swap; there is nothing else on a pad to move them to.
-    if (const char* v = input_cfg("STRIKERS_PAD_SWAP_STICKS"))
+    // Sticks remapping: swap sticks, swap Y axes, invert Y, or D-Pad as stick
+    const char* swapSticksEnv = input_cfg("STRIKERS_PAD_SWAP_STICKS");
+    const char* swapYEnv = input_cfg("STRIKERS_PAD_SWAP_Y");
+    const char* invertYEnv = input_cfg("STRIKERS_PAD_INVERT_Y");
+    const char* dpadStickEnv = input_cfg("STRIKERS_PAD_DPAD_AS_STICK");
+
+    if (swapSticksEnv != nullptr || swapYEnv != nullptr || invertYEnv != nullptr || dpadStickEnv != nullptr)
     {
-        const bool swap = !cfg_off(v);
-        const SDL_GamepadAxis mainX = swap ? SDL_GAMEPAD_AXIS_RIGHTX : SDL_GAMEPAD_AXIS_LEFTX;
-        const SDL_GamepadAxis mainY = swap ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY;
-        const SDL_GamepadAxis subX = swap ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
-        const SDL_GamepadAxis subY = swap ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
-        // SDL's gamepad y-axis is inverted from the GameCube's, which is why the positive direction
-        // takes the negative sign.
-        set_axis(port, PAD_AXIS_LEFT_X_POS, mainX, AXIS_SIGN_POSITIVE);
-        set_axis(port, PAD_AXIS_LEFT_X_NEG, mainX, AXIS_SIGN_NEGATIVE);
-        set_axis(port, PAD_AXIS_LEFT_Y_POS, mainY, AXIS_SIGN_NEGATIVE);
-        set_axis(port, PAD_AXIS_LEFT_Y_NEG, mainY, AXIS_SIGN_POSITIVE);
+        const bool swapSticks = swapSticksEnv != nullptr && !cfg_off(swapSticksEnv);
+        const bool swapY = swapYEnv != nullptr && !cfg_off(swapYEnv);
+        const bool invertY = invertYEnv != nullptr && !cfg_off(invertYEnv);
+        const bool dpadAsStick = dpadStickEnv != nullptr && !cfg_off(dpadStickEnv);
+
+        SDL_GamepadAxis mainX = swapSticks ? SDL_GAMEPAD_AXIS_RIGHTX : SDL_GAMEPAD_AXIS_LEFTX;
+        SDL_GamepadAxis mainY = swapSticks ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY;
+        SDL_GamepadAxis subX = swapSticks ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
+        SDL_GamepadAxis subY = swapSticks ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
+
+        if (swapY)
+        {
+            std::swap(mainY, subY);
+        }
+
+        if (dpadAsStick)
+        {
+            PADAxisMapping m;
+            m.nativeAxis.nativeAxis = -1;
+            m.nativeAxis.sign = AXIS_SIGN_POSITIVE;
+
+            m.padAxis = PAD_AXIS_LEFT_X_POS;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+            PADSetAxisMapping(port, m);
+
+            m.padAxis = PAD_AXIS_LEFT_X_NEG;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+            PADSetAxisMapping(port, m);
+
+            m.padAxis = PAD_AXIS_LEFT_Y_POS;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_UP;
+            PADSetAxisMapping(port, m);
+
+            m.padAxis = PAD_AXIS_LEFT_Y_NEG;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+            PADSetAxisMapping(port, m);
+        }
+        else
+        {
+            const PADAxisSign posSignY = invertY ? AXIS_SIGN_POSITIVE : AXIS_SIGN_NEGATIVE;
+            const PADAxisSign negSignY = invertY ? AXIS_SIGN_NEGATIVE : AXIS_SIGN_POSITIVE;
+
+            set_axis(port, PAD_AXIS_LEFT_X_POS, mainX, AXIS_SIGN_POSITIVE);
+            set_axis(port, PAD_AXIS_LEFT_X_NEG, mainX, AXIS_SIGN_NEGATIVE);
+            set_axis(port, PAD_AXIS_LEFT_Y_POS, mainY, posSignY);
+            set_axis(port, PAD_AXIS_LEFT_Y_NEG, mainY, negSignY);
+        }
+
         set_axis(port, PAD_AXIS_RIGHT_X_POS, subX, AXIS_SIGN_POSITIVE);
         set_axis(port, PAD_AXIS_RIGHT_X_NEG, subX, AXIS_SIGN_NEGATIVE);
         set_axis(port, PAD_AXIS_RIGHT_Y_POS, subY, AXIS_SIGN_NEGATIVE);
         set_axis(port, PAD_AXIS_RIGHT_Y_NEG, subY, AXIS_SIGN_POSITIVE);
+
+        OSReport("[port] input: custom stick configuration applied (swapSticks=%d, swapY=%d, invertY=%d, dpad=%d)\n",
+                 swapSticks, swapY, invertY, dpadAsStick);
     }
 
     if (PADDeadZones* dz = PADGetDeadZones(port))
@@ -611,6 +658,37 @@ bool s_padsLooked = false;
 
 void poll_controllers(bool report)
 {
+    static bool s_mappingsLoaded = false;
+    if (!s_mappingsLoaded)
+    {
+        s_mappingsLoaded = true;
+        const char* customPaths[] = {
+            "custom_controls.txt",
+            "/roms/ports/strikers/custom_controls.txt",
+            "strikers_controls.txt"
+        };
+        for (const char* cp : customPaths)
+        {
+            if (FILE* f = std::fopen(cp, "r"))
+            {
+                char line[1024];
+                while (std::fgets(line, sizeof(line), f))
+                {
+                    size_t len = std::strlen(line);
+                    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n'))
+                        line[--len] = '\0';
+                    if (len > 10 && line[0] != '#')
+                    {
+                        int ret = SDL_AddGamepadMapping(line);
+                        OSReport("[port] input: SDL_AddGamepadMapping from %s returned %d\n", cp, ret);
+                    }
+                }
+                std::fclose(f);
+                break;
+            }
+        }
+    }
+
     for (u32 p = 0; p < PAD_CHANMAX; p++)
     {
         const s32 idx = PADGetIndexForPort(p);
