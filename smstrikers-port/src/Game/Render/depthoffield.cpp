@@ -17,12 +17,24 @@ void DepthOfFieldManager::Initialize()
     // EMPTY
 }
 
+#include <cstdlib>
+#include <cstring>
+
 /**
  * Offset/Address/Size: 0x1FC | 0x80163788 | size: 0xC
  */
 void DepthOfFieldManager::TurnOn()
 {
-    m_bOn = true;
+    static int s_enableDof = -1;
+    if (s_enableDof < 0)
+    {
+        const char* e = getenv("STRIKERS_ENABLE_DOF");
+        s_enableDof = (e != nullptr && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    if (s_enableDof)
+    {
+        m_bOn = true;
+    }
 }
 
 /**

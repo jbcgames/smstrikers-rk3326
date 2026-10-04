@@ -11,6 +11,7 @@
 #include "NL/nlMemory.h"
 #include "PowerPC_EABI_Support/Runtime/MWCPlusLib.h"
 #include "types.h"
+#include <cstdlib>
 
 struct TextureFrame
 {
@@ -1135,6 +1136,19 @@ inline Particle::Particle()
  */
 bool fxParticleStartup(int maxNumParticles)
 {
+    const char* env = getenv("STRIKERS_MAX_PARTICLES");
+    if (env != nullptr && env[0] != '\0')
+    {
+        int customMax = atoi(env);
+        if (customMax > 0)
+        {
+            maxNumParticles = customMax;
+        }
+    }
+    else
+    {
+        maxNumParticles = 512;
+    }
     MaxNumParticles = maxNumParticles;
     BuildFrameTable();
     AllocateParticles();

@@ -423,8 +423,11 @@ static void glx_SendViews()
             continue;
 
         case 0x11:
-            glx_DOFUpdate(dofRange.x);
-            glx_DOFGrab();
+            if (dofRange.y > 0.0f)
+            {
+                glx_DOFUpdate(dofRange.x);
+                glx_DOFGrab();
+            }
             break;
 
         case 0xF:

@@ -996,7 +996,7 @@ void DrawPlanarShadow(const glModel* model, const nlMatrix4& worldMatrix, float 
         RenderBoundingBox(model, worldMatrix);
     }
 
-    if (!g_bDrawPlanarShadows)
+    if (!g_bDrawPlanarShadows || shadowTranslucency <= 0.001f)
     {
         return;
     }
