@@ -14,7 +14,132 @@
 #include "NL/nlPrint.h"
 
 #include "NL/nlBind.h"
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
 
+struct LanguageOption {
+    const char* envName;
+    const char* labelFocused;
+    const char* labelUnfocused;
+    int portLangId;
+    nlLocalization::nlLanguage locLang;
+};
+
+static const LanguageOption s_LanguageOptions[] = {
+    { "spanish", "< IDIOMA: ESPANOL >",   "IDIOMA: ESPANOL",   PORT_LANGUAGE_SPANISH, nlLocalization::LangSpanish },
+    { "english", "< LANGUAGE: ENGLISH >", "LANGUAGE: ENGLISH", PORT_LANGUAGE_ENGLISH, nlLocalization::LangEnglish },
+    { "french",  "< LANGUE: FRANCAIS >",  "LANGUE: FRANCAIS",  PORT_LANGUAGE_FRENCH,  nlLocalization::LangFrench },
+    { "german",  "< SPRACHE: DEUTSCH >",  "SPRACHE: DEUTSCH",  PORT_LANGUAGE_GERMAN,  nlLocalization::LangGerman },
+    { "italian", "< LINGUA: ITALIANO >",  "LINGUA: ITALIANO",  PORT_LANGUAGE_ITALIAN, nlLocalization::LangItalian },
+};
+static const int s_NumLanguages = 5;
+
+static unsigned short s_langFocusedWide[s_NumLanguages][32] = { { 0 } };
+static unsigned short s_langUnfocusedWide[s_NumLanguages][32] = { { 0 } };
+static bool s_langStringsInit = false;
+static int s_selectedLangIndex = -1;
+static int s_bootLangIndex = -1;
+
+static void EnsureLangStringsInit()
+{
+    if (s_langStringsInit) return;
+    for (int i = 0; i < s_NumLanguages; i++)
+    {
+        nlStrToWcs(s_LanguageOptions[i].labelFocused, s_langFocusedWide[i], 32);
+        nlStrToWcs(s_LanguageOptions[i].labelUnfocused, s_langUnfocusedWide[i], 32);
+    }
+    s_langStringsInit = true;
+}
+
+static int GetCurrentBootLangIndex()
+{
+    nlLocalization::nlLanguage cur = g_pLocalization ? g_pLocalization->m_CurrentLanguage : nlLocalization::LangSpanish;
+    for (int i = 0; i < s_NumLanguages; i++)
+    {
+        if (s_LanguageOptions[i].locLang == cur)
+        {
+            return i;
+        }
+    }
+    if (cur == nlLocalization::LangUKEnglish)
+    {
+        for (int i = 0; i < s_NumLanguages; i++)
+        {
+            if (s_LanguageOptions[i].locLang == nlLocalization::LangEnglish)
+                return i;
+        }
+    }
+    return 0; // Default Spanish
+}
+
+static void SaveLanguageEnv(const char* langName)
+{
+    FILE* f = fopen("language.env", "w");
+    if (f)
+    {
+        fprintf(f, "# Super Mario Strikers Language Setting\n");
+        fprintf(f, "export STRIKERS_LANGUAGE=\"%s\"\n", langName);
+        fclose(f);
+    }
+    const char* gamedir = getenv("GAMEDIR");
+    if (gamedir && *gamedir)
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/language.env", gamedir);
+        FILE* fg = fopen(path, "w");
+        if (fg)
+        {
+            fprintf(fg, "# Super Mario Strikers Language Setting\n");
+            fprintf(fg, "export STRIKERS_LANGUAGE=\"%s\"\n", langName);
+            fclose(fg);
+        }
+    }
+    FILE* fr = fopen("/roms/ports/strikers/language.env", "w");
+    if (fr)
+    {
+        fprintf(fr, "# Super Mario Strikers Language Setting\n");
+        fprintf(fr, "export STRIKERS_LANGUAGE=\"%s\"\n", langName);
+        fclose(fr);
+    }
+}
+
+static void ApplyLanguageAndRestart(int langIndex)
+{
+    if (langIndex < 0 || langIndex >= s_NumLanguages) return;
+
+    SaveLanguageEnv(s_LanguageOptions[langIndex].envName);
+
+    FEAudio::PlayAnimAudioEvent("sfx_accept", false);
+
+    // Give sound 250ms to start
+    usleep(250000);
+
+    exit(42);
+}
+
+static void CycleLanguage(OptionsScene* scene, int dir)
+{
+    EnsureLangStringsInit();
+    if (s_bootLangIndex < 0)
+    {
+        s_bootLangIndex = GetCurrentBootLangIndex();
+        s_selectedLangIndex = s_bootLangIndex;
+    }
+
+    s_selectedLangIndex = (s_selectedLangIndex + dir + s_NumLanguages) % s_NumLanguages;
+    FEAudio::PlayAnimAudioEvent("sfx_menu_tick", false);
+
+    if (scene->mMenuItems.GetNumItemsAdded() >= 6)
+    {
+        TLComponentInstance* langComp = scene->mMenuItems.GetMenuItem(5)->GetType();
+        if (langComp)
+        {
+            SetAllTextInComponent(langComp, s_langFocusedWide[s_selectedLangIndex]);
+            langComp->Update(0.0f);
+        }
+    }
+}
 
 static const eMenuState MenuToMenuStateMap[] = {
     MS_AUDIO,
@@ -22,7 +147,7 @@ static const eMenuState MenuToMenuStateMap[] = {
     MS_GAMEPLAY,
     MS_CHEATS,
     MS_SAVE_LOAD,
-    MS_NUMMENUSTATES,
+    MS_LANGUAGE,
 };
 
 s32 OptionsScene::mLastSelectedIndex;
@@ -120,17 +245,27 @@ void OptionsScene::SceneCreated()
             InlineHasher(nlStringLowerHash("Layer")),
             InlineHasher(nlStringLowerHash(menuname)));
         TLComponentInstance* compinstance = (TLComponentInstance*)instance;
-
-        if (MenuToMenuStateMap[i] == MS_NUMMENUSTATES)
-        {
-            if (!nlSingleton<GameInfoManager>::Instance()->HasTrophy(TROPHY_BOWSER_CUP))
-            {
-                compinstance->m_bVisible = false;
-                continue;
-            }
-        }
+        compinstance->m_bVisible = true;
 
         compinstance->SetActiveSlide(i == mLastSelectedIndex ? DoubleHighlite::SLIDE_IN : DoubleHighlite::SLIDE_OUT);
+
+        if (i == 5)
+        {
+            EnsureLangStringsInit();
+            if (s_bootLangIndex < 0)
+            {
+                s_bootLangIndex = GetCurrentBootLangIndex();
+                s_selectedLangIndex = s_bootLangIndex;
+            }
+            if (i == mLastSelectedIndex)
+            {
+                SetAllTextInComponent(compinstance, s_langFocusedWide[s_selectedLangIndex]);
+            }
+            else
+            {
+                SetAllTextInComponent(compinstance, s_langUnfocusedWide[s_selectedLangIndex]);
+            }
+        }
 
         MenuItem<TLComponentInstance>* item = mMenuItems.AddItem(compinstance);
 
@@ -227,8 +362,45 @@ void OptionsScene::Update(float fDeltaT)
  */
 void OptionsScene::UpdateForMain(float fDeltaT)
 {
+    int activeIdx = mMenuItems.GetActiveItemIndex();
+
+    if (activeIdx == 5)
+    {
+        if (g_pFEInput->JustPressed(FE_ALL_PADS, 0xB, false, NULL)) // Left
+        {
+            CycleLanguage(this, -1);
+            return;
+        }
+        else if (g_pFEInput->JustPressed(FE_ALL_PADS, 0xC, false, NULL)) // Right
+        {
+            CycleLanguage(this, 1);
+            return;
+        }
+    }
+
     if (g_pFEInput->JustPressed(FE_ALL_PADS, 0x100, false, NULL))
     {
+        if (activeIdx == 5)
+        {
+            EnsureLangStringsInit();
+            if (s_bootLangIndex < 0)
+            {
+                s_bootLangIndex = GetCurrentBootLangIndex();
+                s_selectedLangIndex = s_bootLangIndex;
+            }
+
+            if (s_selectedLangIndex != s_bootLangIndex)
+            {
+                ApplyLanguageAndRestart(s_selectedLangIndex);
+                return;
+            }
+            else
+            {
+                CycleLanguage(this, 1);
+                return;
+            }
+        }
+
         FEAudio::PlayAnimAudioEvent("sfx_accept", false);
         FEAudio::PlayAnimAudioEvent("sfx_screen_forward", false);
 
@@ -412,6 +584,24 @@ void OptionsScene::ChangeMenuState(eMenuState newState)
         m_subMenu = new (nlMalloc(sizeof(OptionsSaveLoad), 8, false))
             OptionsSaveLoad(pres, ButtonComponent::BS_A_AND_B);
         break;
+    case MS_LANGUAGE:
+    {
+        EnsureLangStringsInit();
+        if (s_bootLangIndex < 0)
+        {
+            s_bootLangIndex = GetCurrentBootLangIndex();
+            s_selectedLangIndex = s_bootLangIndex;
+        }
+        if (s_selectedLangIndex != s_bootLangIndex)
+        {
+            ApplyLanguageAndRestart(s_selectedLangIndex);
+        }
+        else
+        {
+            CycleLanguage(this, 1);
+        }
+        break;
+    }
     case MS_NUMMENUSTATES:
         nlSingleton<GameSceneManager>::Instance()->PopEntireStack();
         nlSingleton<GameSceneManager>::Instance()->Push(SCENE_CREDITS, SCREEN_NOTHING, false);
@@ -473,6 +663,14 @@ void OptionsScene::OpenItem(TLComponentInstance* compinstance)
 {
     DoubleHighlite::OpenItem(compinstance);
 
+    EnsureLangStringsInit();
+    if (mMenuItems.GetNumItemsAdded() >= 6 && compinstance == mMenuItems.GetMenuItem(5)->GetType())
+    {
+        if (s_selectedLangIndex < 0) s_selectedLangIndex = GetCurrentBootLangIndex();
+        SetAllTextInComponent(compinstance, s_langFocusedWide[s_selectedLangIndex]);
+        compinstance->Update(0.0f);
+    }
+
     if (mMenuItems.GetMenuItem()->IsLocked())
     {
         TLTextInstance* text = FEFinder<TLTextInstance, 3>::Find<TLSlide>(
@@ -505,6 +703,14 @@ void OptionsScene::OpenItem(TLComponentInstance* compinstance)
 void OptionsScene::CloseItem(TLComponentInstance* compinstance)
 {
     DoubleHighlite::CloseItem(compinstance);
+
+    EnsureLangStringsInit();
+    if (mMenuItems.GetNumItemsAdded() >= 6 && compinstance == mMenuItems.GetMenuItem(5)->GetType())
+    {
+        s_selectedLangIndex = s_bootLangIndex >= 0 ? s_bootLangIndex : GetCurrentBootLangIndex();
+        SetAllTextInComponent(compinstance, s_langUnfocusedWide[s_selectedLangIndex]);
+        compinstance->Update(0.0f);
+    }
 
     TLComponentInstance* lockedComp = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
         compinstance->GetActiveSlide(),

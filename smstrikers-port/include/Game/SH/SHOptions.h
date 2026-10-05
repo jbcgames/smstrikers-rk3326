@@ -20,7 +20,8 @@ enum eMenuState
     MS_GAMEPLAY = 3,
     MS_CHEATS = 4,
     MS_SAVE_LOAD = 5,
-    MS_NUMMENUSTATES = 6,
+    MS_LANGUAGE = 6,
+    MS_NUMMENUSTATES = 7,
 };
 
 enum ePopupResult

@@ -1005,7 +1005,7 @@ static void EnsureControlStringsInit()
     }
 }
 
-static void SetAllTextInComponent(TLComponentInstance* comp, const unsigned short* wstr)
+void SetAllTextInComponent(TLComponentInstance* comp, const unsigned short* wstr)
 {
     if (!comp || !comp->GetActiveSlide()) return;
 

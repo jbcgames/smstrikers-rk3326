@@ -208,4 +208,6 @@ public:
     /* 0x270 */ CheatSettings mBackupSettings;
 }; // total size: 0x278
 
+void SetAllTextInComponent(TLComponentInstance* comp, const unsigned short* wstr);
+
 #endif // _FEOPTIONSSUBMENUS_H_
