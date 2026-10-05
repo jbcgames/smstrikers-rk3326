@@ -128,7 +128,7 @@ static void CycleLanguage(OptionsScene* scene, int dir)
     }
 
     s_selectedLangIndex = (s_selectedLangIndex + dir + s_NumLanguages) % s_NumLanguages;
-    FEAudio::PlayAnimAudioEvent("sfx_menu_tick", false);
+    FEAudio::PlayAnimAudioEvent(dir > 0 ? "sfx_option_scroll_right" : "sfx_option_scroll_left", false);
 
     if (scene->mMenuItems.GetNumItemsAdded() >= 6)
     {
