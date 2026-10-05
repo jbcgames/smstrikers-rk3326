@@ -192,8 +192,44 @@ int port_language(void)
         {"ja", PORT_LANGUAGE_JAPANESE},       {"jp", PORT_LANGUAGE_JAPANESE},
     };
     static int s_warned;
+    static char s_lang_buf[64] = { 0 };
     const char* v = getenv("STRIKERS_LANGUAGE");
     size_t i;
+
+    if (v == NULL || *v == '\0')
+    {
+        // Try reading language.env if present
+        const char* gamedir = getenv("GAMEDIR");
+        char path[256];
+        FILE* f = fopen("language.env", "r");
+        if (!f && gamedir && *gamedir)
+        {
+            snprintf(path, sizeof(path), "%s/language.env", gamedir);
+            f = fopen(path, "r");
+        }
+        if (!f) f = fopen("/roms/ports/strikers/language.env", "r");
+
+        if (f)
+        {
+            char line[128];
+            while (fgets(line, sizeof(line), f))
+            {
+                char* p = strstr(line, "STRIKERS_LANGUAGE=");
+                if (p)
+                {
+                    p += 18;
+                    while (*p == ' ' || *p == '"' || *p == '\'') p++;
+                    char* end = p + strlen(p) - 1;
+                    while (end > p && (*end == '\n' || *end == '\r' || *end == '"' || *end == '\'' || *end == ' '))
+                        *end-- = '\0';
+                    strncpy(s_lang_buf, p, sizeof(s_lang_buf) - 1);
+                    v = s_lang_buf;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+    }
 
     if (v == NULL || *v == '\0')
 #if defined(__SWITCH__)
@@ -219,10 +255,10 @@ int port_language(void)
     {
         s_warned = 1;
         fprintf(stderr,
-                "[port] STRIKERS_LANGUAGE=%s not recognised; using the disc's own. "
+                "[port] STRIKERS_LANGUAGE=%s not recognised; using Spanish as default. "
                 "Try english, german, french, spanish, italian, japanese, or 0-5.\n", v);
     }
-    return PORT_LANGUAGE_UNSET;
+    return PORT_LANGUAGE_SPANISH;
 }
 
 // The IPL setting a European GameCube kept in SRAM.
@@ -239,8 +275,8 @@ u8 OSGetLanguage(void)
         }
         return 0;
     }
-    // Unset is 0: UK English is the console's default.
-    return language < 0 ? 0 : (u8)language;
+    // Default to Spanish (PORT_LANGUAGE_SPANISH = 3) when unset for European disc
+    return language < 0 ? PORT_LANGUAGE_SPANISH : (u8)language;
 }
 u32 OSGetSoundMode(void) { return 1; }             // stereo
 void OSSetSoundMode(u32 mode) { (void)mode; }
