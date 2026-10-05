@@ -20,23 +20,25 @@
 
 struct LanguageOption {
     const char* envName;
-    const char* labelFocused;
-    const char* labelUnfocused;
+    const char* name;
+    const char* labelDefaultFocused;
+    const char* labelDefaultUnfocused;
     int portLangId;
     nlLocalization::nlLanguage locLang;
 };
 
 static const LanguageOption s_LanguageOptions[] = {
-    { "spanish", "< IDIOMA: ESPANOL >",   "IDIOMA: ESPANOL",   PORT_LANGUAGE_SPANISH, nlLocalization::LangSpanish },
-    { "english", "< LANGUAGE: ENGLISH >", "LANGUAGE: ENGLISH", PORT_LANGUAGE_ENGLISH, nlLocalization::LangEnglish },
-    { "french",  "< LANGUE: FRANCAIS >",  "LANGUE: FRANCAIS",  PORT_LANGUAGE_FRENCH,  nlLocalization::LangFrench },
-    { "german",  "< SPRACHE: DEUTSCH >",  "SPRACHE: DEUTSCH",  PORT_LANGUAGE_GERMAN,  nlLocalization::LangGerman },
-    { "italian", "< LINGUA: ITALIANO >",  "LINGUA: ITALIANO",  PORT_LANGUAGE_ITALIAN, nlLocalization::LangItalian },
+    { "spanish", "ESPANOL",  "< IDIOMA: ESPANOL >",   "IDIOMA: ESPANOL",   PORT_LANGUAGE_SPANISH, nlLocalization::LangSpanish },
+    { "english", "ENGLISH",  "< LANGUAGE: ENGLISH >", "LANGUAGE: ENGLISH", PORT_LANGUAGE_ENGLISH, nlLocalization::LangEnglish },
+    { "french",  "FRANCAIS", "< LANGUE: FRANCAIS >",  "LANGUE: FRANCAIS",  PORT_LANGUAGE_FRENCH,  nlLocalization::LangFrench },
+    { "german",  "DEUTSCH",  "< SPRACHE: DEUTSCH >",  "SPRACHE: DEUTSCH",  PORT_LANGUAGE_GERMAN,  nlLocalization::LangGerman },
+    { "italian", "ITALIANO", "< LINGUA: ITALIANO >",  "LINGUA: ITALIANO",  PORT_LANGUAGE_ITALIAN, nlLocalization::LangItalian },
 };
 static const int s_NumLanguages = 5;
 
 static unsigned short s_langFocusedWide[s_NumLanguages][32] = { { 0 } };
 static unsigned short s_langUnfocusedWide[s_NumLanguages][32] = { { 0 } };
+static unsigned short s_langApplyWide[s_NumLanguages][32] = { { 0 } };
 static bool s_langStringsInit = false;
 static int s_selectedLangIndex = -1;
 static int s_bootLangIndex = -1;
@@ -46,8 +48,12 @@ static void EnsureLangStringsInit()
     if (s_langStringsInit) return;
     for (int i = 0; i < s_NumLanguages; i++)
     {
-        nlStrToWcs(s_LanguageOptions[i].labelFocused, s_langFocusedWide[i], 32);
-        nlStrToWcs(s_LanguageOptions[i].labelUnfocused, s_langUnfocusedWide[i], 32);
+        char applyBuf[32];
+        snprintf(applyBuf, sizeof(applyBuf), "< %s (A) >", s_LanguageOptions[i].name);
+
+        nlStrToWcs(s_LanguageOptions[i].labelDefaultFocused, s_langFocusedWide[i], 32);
+        nlStrToWcs(s_LanguageOptions[i].labelDefaultUnfocused, s_langUnfocusedWide[i], 32);
+        nlStrToWcs(applyBuf, s_langApplyWide[i], 32);
     }
     s_langStringsInit = true;
 }
@@ -71,6 +77,29 @@ static int GetCurrentBootLangIndex()
         }
     }
     return 0; // Default Spanish
+}
+
+static const unsigned short* GetLangItemText(bool isFocused)
+{
+    EnsureLangStringsInit();
+    if (s_bootLangIndex < 0) s_bootLangIndex = GetCurrentBootLangIndex();
+    if (s_selectedLangIndex < 0) s_selectedLangIndex = s_bootLangIndex;
+
+    if (isFocused)
+    {
+        if (s_selectedLangIndex == s_bootLangIndex)
+        {
+            return s_langFocusedWide[s_selectedLangIndex];
+        }
+        else
+        {
+            return s_langApplyWide[s_selectedLangIndex];
+        }
+    }
+    else
+    {
+        return s_langUnfocusedWide[s_selectedLangIndex];
+    }
 }
 
 static void SaveLanguageEnv(const char* langName)
@@ -112,10 +141,11 @@ static void ApplyLanguageAndRestart(int langIndex)
 
     FEAudio::PlayAnimAudioEvent("sfx_accept", false);
 
-    // Give sound 250ms to start
-    usleep(250000);
+    fflush(NULL);
+    usleep(200000);
 
-    exit(42);
+    // Use _exit to avoid libc atexit destructor aborts in Aurora
+    _exit(42);
 }
 
 static void CycleLanguage(OptionsScene* scene, int dir)
@@ -135,7 +165,7 @@ static void CycleLanguage(OptionsScene* scene, int dir)
         TLComponentInstance* langComp = scene->mMenuItems.GetMenuItem(5)->GetType();
         if (langComp)
         {
-            SetAllTextInComponent(langComp, s_langFocusedWide[s_selectedLangIndex]);
+            SetAllTextInComponent(langComp, GetLangItemText(true));
             langComp->Update(0.0f);
         }
     }
@@ -257,14 +287,7 @@ void OptionsScene::SceneCreated()
                 s_bootLangIndex = GetCurrentBootLangIndex();
                 s_selectedLangIndex = s_bootLangIndex;
             }
-            if (i == mLastSelectedIndex)
-            {
-                SetAllTextInComponent(compinstance, s_langFocusedWide[s_selectedLangIndex]);
-            }
-            else
-            {
-                SetAllTextInComponent(compinstance, s_langUnfocusedWide[s_selectedLangIndex]);
-            }
+            SetAllTextInComponent(compinstance, GetLangItemText(i == mLastSelectedIndex));
         }
 
         MenuItem<TLComponentInstance>* item = mMenuItems.AddItem(compinstance);
@@ -378,7 +401,10 @@ void OptionsScene::UpdateForMain(float fDeltaT)
         }
     }
 
-    if (g_pFEInput->JustPressed(FE_ALL_PADS, 0x100, false, NULL))
+    bool aPressed = g_pFEInput->JustPressed(FE_ALL_PADS, 0x100, false, NULL);
+    bool startPressed = g_pFEInput->JustPressed(FE_ALL_PADS, 0x1000, false, NULL);
+
+    if (aPressed || startPressed)
     {
         if (activeIdx == 5)
         {
@@ -409,6 +435,7 @@ void OptionsScene::UpdateForMain(float fDeltaT)
     }
     else if (g_pFEInput->JustPressed(FE_ALL_PADS, 0x200, false, NULL))
     {
+        s_selectedLangIndex = s_bootLangIndex >= 0 ? s_bootLangIndex : GetCurrentBootLangIndex();
         nlSingleton<GameSceneManager>::Instance()->PopEntireStack();
 
         if (SaveLoadScene::IsIOEnabled())
@@ -666,8 +693,7 @@ void OptionsScene::OpenItem(TLComponentInstance* compinstance)
     EnsureLangStringsInit();
     if (mMenuItems.GetNumItemsAdded() >= 6 && compinstance == mMenuItems.GetMenuItem(5)->GetType())
     {
-        if (s_selectedLangIndex < 0) s_selectedLangIndex = GetCurrentBootLangIndex();
-        SetAllTextInComponent(compinstance, s_langFocusedWide[s_selectedLangIndex]);
+        SetAllTextInComponent(compinstance, GetLangItemText(true));
         compinstance->Update(0.0f);
     }
 
@@ -707,8 +733,7 @@ void OptionsScene::CloseItem(TLComponentInstance* compinstance)
     EnsureLangStringsInit();
     if (mMenuItems.GetNumItemsAdded() >= 6 && compinstance == mMenuItems.GetMenuItem(5)->GetType())
     {
-        s_selectedLangIndex = s_bootLangIndex >= 0 ? s_bootLangIndex : GetCurrentBootLangIndex();
-        SetAllTextInComponent(compinstance, s_langUnfocusedWide[s_selectedLangIndex]);
+        SetAllTextInComponent(compinstance, GetLangItemText(false));
         compinstance->Update(0.0f);
     }
 
