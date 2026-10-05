@@ -387,20 +387,6 @@ void OptionsScene::UpdateForMain(float fDeltaT)
 {
     int activeIdx = mMenuItems.GetActiveItemIndex();
 
-    if (activeIdx == 5)
-    {
-        if (g_pFEInput->JustPressed(FE_ALL_PADS, 0xB, false, NULL)) // Left
-        {
-            CycleLanguage(this, -1);
-            return;
-        }
-        else if (g_pFEInput->JustPressed(FE_ALL_PADS, 0xC, false, NULL)) // Right
-        {
-            CycleLanguage(this, 1);
-            return;
-        }
-    }
-
     bool aPressed = g_pFEInput->JustPressed(FE_ALL_PADS, 0x100, false, NULL);
     bool startPressed = g_pFEInput->JustPressed(FE_ALL_PADS, 0x1000, false, NULL);
 
@@ -467,6 +453,17 @@ void OptionsScene::UpdateForMain(float fDeltaT)
     else if (g_pFEInput->IsAutoPressed(FE_ALL_PADS, 0xE, true, NULL))
     {
         mMenuItems.NextItem();
+    }
+    else if (activeIdx == 5)
+    {
+        if (g_pFEInput->IsAutoPressed(FE_ALL_PADS, 0xB, true, NULL)) // Left
+        {
+            CycleLanguage(this, -1);
+        }
+        else if (g_pFEInput->IsAutoPressed(FE_ALL_PADS, 0xC, true, NULL)) // Right
+        {
+            CycleLanguage(this, 1);
+        }
     }
 }
 
@@ -733,6 +730,7 @@ void OptionsScene::CloseItem(TLComponentInstance* compinstance)
     EnsureLangStringsInit();
     if (mMenuItems.GetNumItemsAdded() >= 6 && compinstance == mMenuItems.GetMenuItem(5)->GetType())
     {
+        s_selectedLangIndex = s_bootLangIndex >= 0 ? s_bootLangIndex : GetCurrentBootLangIndex();
         SetAllTextInComponent(compinstance, GetLangItemText(false));
         compinstance->Update(0.0f);
     }
