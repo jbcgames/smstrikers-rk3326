@@ -12,6 +12,7 @@ float g_fTaskTimeUpperBound = 0.1f;
 nlTaskManager* nlTaskManager::m_pInstance = nullptr;
 u8 g_DoStackWatermarkTests;
 float g_fTaskTimeLowerBound;
+bool g_bSuperStrikeActive = false;
 
 /**
  * Offset/Address/Size: 0x0 | 0x801D28FC | size: 0xC

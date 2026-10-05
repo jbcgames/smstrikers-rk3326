@@ -7,10 +7,12 @@
 
 #include "Game/Sys/simpleparser.h"
 
+#include <stdlib.h>
 #include "string.h"
 
 #include "NL/nlMath.h"
 #include "NL/nlString.h"
+#include "port/GraphicsPresets.h"
 
 template <>
 ScreenTransitionManager* nlSingleton<ScreenTransitionManager>::s_pInstance = 0;
@@ -158,6 +160,18 @@ void ScreenTransitionManager::EnableRandomTransition(const char* filter)
  */
 void ScreenTransitionManager::SelectRandomTransition(const char* filter)
 {
+    int optFastTransitions = Strikers_GetFastTransitions();
+
+    if (optFastTransitions == 2)
+    {
+        m_SelectedTransition = nullptr;
+        return;
+    }
+    if (optFastTransitions == 1 && filter != nullptr && strcmp(filter, "cut") != 0)
+    {
+        filter = "fade_to_white_and_back";
+    }
+
     Vector<BasicString<char, Detail::TempStringAllocator>, DefaultAllocator> candidates;
     candidates.mData = nullptr;
     candidates.mSize = 0;

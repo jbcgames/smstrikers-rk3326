@@ -8,6 +8,7 @@
 #include "NL/gl/glState.h"
 #include "NL/gl/glUserData.h"
 #include "Game/GameObjectLighting.h"
+#include "port/GraphicsPresets.h"
 
 #include "NL/nlConfig.h"
 #include "NL/nlFileGC.h"
@@ -27,6 +28,7 @@
 #include "Game/Game.h"
 #include "Game/GameInfo.h"
 #include "Game/WorldManager.h"
+#include "Game/Render/ShootToScoreArrow.h"
 #include "port/aspect.h"
 
 static inline float GetAspectRatio()
@@ -236,6 +238,8 @@ static void SetupRenderInfo()
 
     s32 state;
 
+    int optCutsceneSkin = Strikers_GetCutsceneSkin();
+
     if (BeginFrameTask::s_GameplaySkin != 2)
     {
         cCharacter::m_ModelType = (eCharacterModelType)(BeginFrameTask::s_GameplaySkin != 0);
@@ -254,10 +258,10 @@ static void SetupRenderInfo()
             {
             case 0x10:
             case 0x100:
-                cCharacter::m_ModelType = CharModel_Blend;
+                cCharacter::m_ModelType = (optCutsceneSkin == 1) ? CharModel_Blend : CharModel_Rigid;
                 break;
             case 0x20000:
-                if (BeginFrameTask::s_ReplaySkin == 0)
+                if (optCutsceneSkin == 0 || BeginFrameTask::s_ReplaySkin == 0)
                 {
                     cCharacter::m_ModelType = CharModel_Rigid;
                 }
@@ -281,9 +285,11 @@ static void SetupRenderInfo()
     {
         if (g_pGame->mbCaptainShotToScoreOn)
         {
-            cCharacter::m_ModelType = CharModel_Blend;
+            cCharacter::m_ModelType = (optCutsceneSkin == 1) ? CharModel_Blend : CharModel_Rigid;
         }
     }
+
+    g_bSuperStrikeActive = ((g_pGame != NULL && g_pGame->mbCaptainShotToScoreOn) || WorldDarkening::Instance().mActive);
 
     if (!init)
     {

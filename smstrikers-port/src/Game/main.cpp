@@ -31,6 +31,8 @@ extern "C" void PortDebugFrame(void);   // PORT: defined in Game.cpp
 #include "port/determinism.h"
 #include "port/config.h"
 #include "port/texture_packs.h"
+#include "port/GraphicsPresets.h"
+#include "port/ControlPresets.h"
 #include "Game/Audio/AudioStream.h"
 #include "Game/Sys/audio.h"
 #include "Game/Sys/clock.h"
@@ -702,6 +704,9 @@ int main(int argc, char* argv[])
             OSReport("[port] %s: %d setting(s)\n",
                      PortConfigPath(), applied);
     }
+
+    Strikers_InitGraphicsPreset();
+    Strikers_InitControlPreset();
 
 #if defined(PORT_USE_AURORA)
     {

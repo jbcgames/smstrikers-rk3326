@@ -276,7 +276,14 @@ void ModeledScreenTransition::Render(eGLView view)
         glViewAttachModel(s_3DView, &m_pModels[i]);
     }
 
-    if (m_bEnableGrab)
+    static int s_optDisableGrab = -1;
+    if (s_optDisableGrab < 0)
+    {
+        const char* e = getenv("STRIKERS_DISABLE_SCREENGRAB");
+        s_optDisableGrab = (e != nullptr && strcmp(e, "0") == 0) ? 0 : 1;
+    }
+
+    if (m_bEnableGrab && !s_optDisableGrab)
     {
         glViewSetFilter(GLV_ScreenGrab, GLFilter_Blt);
         glViewSetFilterSource(GLV_ScreenGrab, GLTG_Main);
@@ -285,9 +292,17 @@ void ModeledScreenTransition::Render(eGLView view)
     else
     {
         glViewSetFilter(GLV_ScreenGrab, GLFilter_None);
+        m_bEnableGrab = false;
     }
 
-    if (m_RenderOutline)
+    static int s_optDisableOutline = -1;
+    if (s_optDisableOutline < 0)
+    {
+        const char* e = getenv("STRIKERS_DISABLE_TRANSITION_OUTLINE");
+        s_optDisableOutline = (e != nullptr && strcmp(e, "0") == 0) ? 0 : 1;
+    }
+
+    if (m_RenderOutline && !s_optDisableOutline)
     {
         RenderOutline();
     }

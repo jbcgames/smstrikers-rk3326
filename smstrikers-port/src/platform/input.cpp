@@ -27,6 +27,7 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame) { (void)frame; }
 #include "dolphin/pad.h"
 #include "port/input.h"
 #include "port/overlay.h"
+#include "port/ControlPresets.h"
 
 namespace
 {
@@ -426,6 +427,72 @@ void check_pad_config()
     }
 }
 
+} // namespace
+
+void Strikers_SetGamepadStickMode(bool swapSticks, bool swapY, bool invertY, bool dpadAsStick)
+{
+    SDL_GamepadAxis mainX = swapSticks ? SDL_GAMEPAD_AXIS_RIGHTX : SDL_GAMEPAD_AXIS_LEFTX;
+    SDL_GamepadAxis mainY = swapSticks ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY;
+    SDL_GamepadAxis subX = swapSticks ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
+    SDL_GamepadAxis subY = swapSticks ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
+
+    if (swapY)
+    {
+        std::swap(mainY, subY);
+    }
+
+    for (u32 p = 0; p < 4; p++)
+    {
+        u32 count = 0;
+        if (PADGetButtonMappings(p, &count) == nullptr)
+            continue;
+
+        if (dpadAsStick)
+        {
+            PADAxisMapping m;
+            m.nativeAxis.nativeAxis = -1;
+            m.nativeAxis.sign = AXIS_SIGN_POSITIVE;
+
+            m.padAxis = PAD_AXIS_LEFT_X_POS;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+            PADSetAxisMapping(p, m);
+
+            m.padAxis = PAD_AXIS_LEFT_X_NEG;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+            PADSetAxisMapping(p, m);
+
+            m.padAxis = PAD_AXIS_LEFT_Y_POS;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_UP;
+            PADSetAxisMapping(p, m);
+
+            m.padAxis = PAD_AXIS_LEFT_Y_NEG;
+            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+            PADSetAxisMapping(p, m);
+        }
+        else
+        {
+            const PADAxisSign posSignY = invertY ? AXIS_SIGN_POSITIVE : AXIS_SIGN_NEGATIVE;
+            const PADAxisSign negSignY = invertY ? AXIS_SIGN_NEGATIVE : AXIS_SIGN_POSITIVE;
+
+            set_axis(p, PAD_AXIS_LEFT_X_POS, mainX, AXIS_SIGN_POSITIVE);
+            set_axis(p, PAD_AXIS_LEFT_X_NEG, mainX, AXIS_SIGN_NEGATIVE);
+            set_axis(p, PAD_AXIS_LEFT_Y_POS, mainY, posSignY);
+            set_axis(p, PAD_AXIS_LEFT_Y_NEG, mainY, negSignY);
+        }
+
+        set_axis(p, PAD_AXIS_RIGHT_X_POS, subX, AXIS_SIGN_POSITIVE);
+        set_axis(p, PAD_AXIS_RIGHT_X_NEG, subX, AXIS_SIGN_NEGATIVE);
+        set_axis(p, PAD_AXIS_RIGHT_Y_POS, subY, AXIS_SIGN_NEGATIVE);
+        set_axis(p, PAD_AXIS_RIGHT_Y_NEG, subY, AXIS_SIGN_POSITIVE);
+    }
+
+    OSReport("[port] input: custom stick configuration applied (swapSticks=%d, swapY=%d, invertY=%d, dpad=%d)\n",
+             swapSticks, swapY, invertY, dpadAsStick);
+}
+
+namespace
+{
+
 void apply_gamepad(u32 port, bool report)
 {
     // Ask for the mappings before changing any, because that is what makes Aurora load them:
@@ -479,56 +546,7 @@ void apply_gamepad(u32 port, bool report)
         const bool invertY = invertYEnv != nullptr && !cfg_off(invertYEnv);
         const bool dpadAsStick = dpadStickEnv != nullptr && !cfg_off(dpadStickEnv);
 
-        SDL_GamepadAxis mainX = swapSticks ? SDL_GAMEPAD_AXIS_RIGHTX : SDL_GAMEPAD_AXIS_LEFTX;
-        SDL_GamepadAxis mainY = swapSticks ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY;
-        SDL_GamepadAxis subX = swapSticks ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
-        SDL_GamepadAxis subY = swapSticks ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
-
-        if (swapY)
-        {
-            std::swap(mainY, subY);
-        }
-
-        if (dpadAsStick)
-        {
-            PADAxisMapping m;
-            m.nativeAxis.nativeAxis = -1;
-            m.nativeAxis.sign = AXIS_SIGN_POSITIVE;
-
-            m.padAxis = PAD_AXIS_LEFT_X_POS;
-            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
-            PADSetAxisMapping(port, m);
-
-            m.padAxis = PAD_AXIS_LEFT_X_NEG;
-            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_LEFT;
-            PADSetAxisMapping(port, m);
-
-            m.padAxis = PAD_AXIS_LEFT_Y_POS;
-            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_UP;
-            PADSetAxisMapping(port, m);
-
-            m.padAxis = PAD_AXIS_LEFT_Y_NEG;
-            m.nativeButton = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
-            PADSetAxisMapping(port, m);
-        }
-        else
-        {
-            const PADAxisSign posSignY = invertY ? AXIS_SIGN_POSITIVE : AXIS_SIGN_NEGATIVE;
-            const PADAxisSign negSignY = invertY ? AXIS_SIGN_NEGATIVE : AXIS_SIGN_POSITIVE;
-
-            set_axis(port, PAD_AXIS_LEFT_X_POS, mainX, AXIS_SIGN_POSITIVE);
-            set_axis(port, PAD_AXIS_LEFT_X_NEG, mainX, AXIS_SIGN_NEGATIVE);
-            set_axis(port, PAD_AXIS_LEFT_Y_POS, mainY, posSignY);
-            set_axis(port, PAD_AXIS_LEFT_Y_NEG, mainY, negSignY);
-        }
-
-        set_axis(port, PAD_AXIS_RIGHT_X_POS, subX, AXIS_SIGN_POSITIVE);
-        set_axis(port, PAD_AXIS_RIGHT_X_NEG, subX, AXIS_SIGN_NEGATIVE);
-        set_axis(port, PAD_AXIS_RIGHT_Y_POS, subY, AXIS_SIGN_NEGATIVE);
-        set_axis(port, PAD_AXIS_RIGHT_Y_NEG, subY, AXIS_SIGN_POSITIVE);
-
-        OSReport("[port] input: custom stick configuration applied (swapSticks=%d, swapY=%d, invertY=%d, dpad=%d)\n",
-                 swapSticks, swapY, invertY, dpadAsStick);
+        Strikers_SetGamepadStickMode(swapSticks, swapY, invertY, dpadAsStick);
     }
 
     if (PADDeadZones* dz = PADGetDeadZones(port))

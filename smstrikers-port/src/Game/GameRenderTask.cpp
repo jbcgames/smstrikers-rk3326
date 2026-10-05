@@ -22,6 +22,7 @@
 #include "Game/Render/depthoffield.h"
 #include "Game/ReplayManager.h"
 #include "Game/WorldManager.h"
+#include "port/GraphicsPresets.h"
 
 #include "NL/MemAlloc.h"
 #include "NL/nlConfig.h"
@@ -219,9 +220,18 @@ void GameRenderTask::Run(float fDeltaT)
 
     float dt = (nlTaskManager::m_pInstance->m_CurrState == 1) ? 0.0f : fDeltaT;
 
-    Jumbotron::instance.Update(dt);
+    if (!nlIsCutsceneState())
+    {
+        Jumbotron::instance.Update(dt);
+    }
     CrowdManager::instance.Update(dt);
-    FlareHandler::instance.Render();
+
+    bool skipEffects = (Strikers_GetCutsceneEffects() == 0 && nlIsCutsceneState());
+
+    if (!skipEffects)
+    {
+        FlareHandler::instance.Render();
+    }
 
     for (int charIndex = 0; charIndex < 10; charIndex++)
     {
@@ -338,6 +348,9 @@ void GameRenderTask::Run(float fDeltaT)
 
     WarbleTest();
 
-    PhotoFlash::Render(fDeltaT);
-    UpdateElectricFence(fDeltaT);
+    if (!skipEffects)
+    {
+        PhotoFlash::Render(fDeltaT);
+        UpdateElectricFence(fDeltaT);
+    }
 }

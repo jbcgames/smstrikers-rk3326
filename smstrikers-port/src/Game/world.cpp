@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "port/input.h"
+#include "port/GraphicsPresets.h"
+#include "NL/nlTask.h"
 #include "NL/nlString.h"
 #include "NL/vmath.h"
 #include "Game/World.h"
@@ -1484,16 +1486,52 @@ void World::Render()
                             if (!bPassed) ++g_portCullDropped;
                         }
                         if (bNoCull) bPassed = true;
+
+                        if (bPassed && nlIsCutsceneState())
+                        {
+                            int optCutsceneExtra = Strikers_GetCutsceneCullExtra();
+                            float optCutsceneMaxDist = Strikers_GetCutsceneMaxDist();
+                            float optCutsceneLod = Strikers_GetCutsceneLod();
+
+                            // 1. Skip extra props (gameplay invisible & camera occluder models)
+                            if (optCutsceneExtra && (pObject->m_uObjectCreationFlags & 0xA000))
+                            {
+                                bPassed = false;
+                            }
+                            // 2. Distance and LOD solid-angle culling (keep pitch, skybox, ball, hammer)
+                            else if (!bSkybox && !bBall && !bHammer)
+                            {
+                                float radius = pObject->m_fBoundingRadius;
+                                if (radius < 25.0f)
+                                {
+                                    const nlVector3& objPos = pObject->GetWorldMatrix().GetTranslation();
+                                    float dist = cCameraManager::GetDistanceFromCameraToObject(objPos);
+                                    if (dist > optCutsceneMaxDist)
+                                    {
+                                        bPassed = false;
+                                    }
+                                    else if (dist > 15.0f && (radius / dist) < optCutsceneLod)
+                                    {
+                                        bPassed = false;
+                                    }
+                                }
+                            }
+                        }
+
                         if (bPassed)
                         {
                             if (pObject->m_uObjectCreationFlags & 0xF000)
                                 DoTranslucency(pObject);
-                            pObject->Draw();
-                            if (g_bDrawBoundingSphere)
+
+                            if (pObject->m_translucency > 0.0f)
                             {
-                                RenderBoundingSphere(pObject->GetWorldMatrix(), pObject->m_fBoundingRadius);
+                                pObject->Draw();
+                                if (g_bDrawBoundingSphere)
+                                {
+                                    RenderBoundingSphere(pObject->GetWorldMatrix(), pObject->m_fBoundingRadius);
+                                }
+                                nDrawn++;
                             }
-                            nDrawn++;
                         }
                         else
                         {
@@ -1527,12 +1565,16 @@ void World::Render()
             {
                 if (pObject->m_uObjectCreationFlags & 0xF000)
                     DoTranslucency(pObject);
-                pObject->Draw();
-                if (g_bDrawBoundingSphere)
+
+                if (pObject->m_translucency > 0.0f)
                 {
-                    RenderBoundingSphere(pObject->GetWorldMatrix(), pObject->m_fBoundingRadius);
+                    pObject->Draw();
+                    if (g_bDrawBoundingSphere)
+                    {
+                        RenderBoundingSphere(pObject->GetWorldMatrix(), pObject->m_fBoundingRadius);
+                    }
+                    nDrawn++;
                 }
-                nDrawn++;
             }
             else
             {
@@ -1548,6 +1590,17 @@ void World::Render()
     }
 
     delete iter;
+
+    if (nlIsCutsceneState())
+    {
+        static unsigned long s_lastCutsceneLog = 0;
+        if (PortInputFrame() - s_lastCutsceneLog >= 60)
+        {
+            s_lastCutsceneLog = PortInputFrame();
+            fprintf(stdout, "[cutscene-world] frame %lu: %d submitted, %d culled, %d drawn\n",
+                    s_lastCutsceneLog, nSubmitted, nSubmitted - nDrawn, nDrawn);
+        }
+    }
 
     if (g_bDrawCullingInfo)
     {

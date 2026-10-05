@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include "port/probeobj.h"
 extern "C" void OSReport(const char*, ...);
+#include "NL/nlTask.h"
 #include "Game/AI/Powerups.h"
 #include "Game/Render/NetMesh.h"
 #include "Game/Render/CrowdManager.h"
@@ -763,6 +764,11 @@ void BasicStadium::StartCameraFlashes()
 
 void BasicStadium::UpdateCameraFlashes(float fTimeDelta)
 {
+    if (nlIsCutsceneState())
+    {
+        return;
+    }
+
     if (m_NumCameraFlashPositions != 0)
     {
         u32 randomValue = nlRandom(m_NumCameraFlashPositions, &nlDefaultSeed);

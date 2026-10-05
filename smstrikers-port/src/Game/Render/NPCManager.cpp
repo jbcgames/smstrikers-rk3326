@@ -10,6 +10,7 @@
 #include "NL/nlFileGC.h"
 #include "NL/nlMemory.h"
 #include "NL/nlString.h"
+#include "NL/nlTask.h"
 #include "NL/gl/gl.h"
 
 struct NPCTemplateInfo
@@ -210,6 +211,11 @@ void NPCManager::UpdateNPCs(float dt)
  */
 void NPCManager::RenderNPCs()
 {
+    if (nlIsCutsceneState())
+    {
+        return;
+    }
+
     ListEntry<SkinAnimatedNPC*>* current = mNPCList.m_Head;
     while (current != nullptr)
     {

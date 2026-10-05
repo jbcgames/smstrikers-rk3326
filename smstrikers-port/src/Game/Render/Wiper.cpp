@@ -1,9 +1,12 @@
 #include "Game/Render/Wiper.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "string.h"
 
 #include "NL/nlConfig.h"
 #include "Game/Audio/WorldAudio.h"
+#include "port/GraphicsPresets.h"
 
 extern bool g_ForceDoubleBallTransition;
 
@@ -72,10 +75,28 @@ void Wiper::DoWipe(const char* wipe)
 {
     if (!wiperCallback.mTransitionActive)
     {
-        if (g_ForceDoubleBallTransition != 0)
+        const char* origWipe = wipe ? wipe : "(null)";
+
+        int optFastTransitions = Strikers_GetFastTransitions();
+
+        if (optFastTransitions == 2)
+        {
+            wipe = "cut";
+        }
+        else if (optFastTransitions == 1)
+        {
+            if (wipe != nullptr && strcmp(wipe, "cut") != 0)
+            {
+                wipe = "fade_to_white_and_back";
+            }
+        }
+
+        if (g_ForceDoubleBallTransition != 0 && optFastTransitions == 0)
         {
             wipe = "double_ball";
         }
+
+        fprintf(stdout, "[wiper] DoWipe: requested '%s' -> using '%s'\n", origWipe, wipe ? wipe : "(null)");
 
         wiperCallback.mTransitionActive = true;
 
@@ -111,7 +132,13 @@ void Wiper::DoWipe(const char* wipe)
  */
 void Wiper::Render(float dt)
 {
-    dt = dt * GetConfigFloat(Config::Global(), "transitions/speed", 1.0f);
+    static float s_optTransitionSpeed = -1.0f;
+    if (s_optTransitionSpeed < 0.0f)
+    {
+        const char* e = getenv("STRIKERS_TRANSITION_SPEED");
+        s_optTransitionSpeed = e ? (float)atof(e) : 1.0f;
+    }
+    dt = dt * s_optTransitionSpeed * GetConfigFloat(Config::Global(), "transitions/speed", 1.0f);
     ScreenTransitionManager::Instance()->Render(dt);
 }
 

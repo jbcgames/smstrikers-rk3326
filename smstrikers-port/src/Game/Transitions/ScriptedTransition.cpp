@@ -560,7 +560,14 @@ public:
      */
     virtual void ApplyModifier(glPoly2& poly, float time)
     {
-        if (m_bDoGrab)
+        static int s_optDisableGrab = -1;
+        if (s_optDisableGrab < 0)
+        {
+            const char* e = getenv("STRIKERS_DISABLE_SCREENGRAB");
+            s_optDisableGrab = (e != nullptr && strcmp(e, "0") == 0) ? 0 : 1;
+        }
+
+        if (m_bDoGrab && !s_optDisableGrab)
         {
             glViewSetFilter(GLV_ScreenGrab, GLFilter_Blt);
             glViewSetFilterSource(GLV_ScreenGrab, GLTG_Main);
@@ -569,6 +576,7 @@ public:
         else
         {
             glViewSetFilter(GLV_ScreenGrab, GLFilter_None);
+            m_bDoGrab = false;
         }
     }
 

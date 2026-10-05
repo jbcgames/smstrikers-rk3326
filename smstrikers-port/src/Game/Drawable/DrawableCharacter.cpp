@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "port/input.h"
+#include "port/GraphicsPresets.h"
 // Hoisted: Game/Replay.h's ReplayablePolymorphicPtr calls the qualified ::Replayable<N>, which ADL cannot rescue.
 class LoadFrame;
 class SaveFrame;
@@ -710,11 +711,7 @@ void DrawableCharacter::SendToGl(const cCharacter& character) const
     glModel* pModel = glModelDup(skinMesh->pModel, true);
 
     bool isVisible;
-    if (nlTaskManager::m_pInstance->m_CurrState == 0x100)
-    {
-        isVisible = 1;
-    }
-    else if (WorldManager::s_World != nullptr)
+    if (WorldManager::s_World != nullptr)
     {
         float fRadius;
         if (ec == DONKEYKONG)
@@ -876,7 +873,9 @@ void DrawableCharacter::SendToGl(const cCharacter& character) const
         }
     }
 
-    if (sShadowRenderingDisabled == 0)
+    bool skipCharShadow = (Strikers_GetCutsceneShadows() == 0 && nlIsCutsceneState());
+
+    if (sShadowRenderingDisabled == 0 && !skipCharShadow)
     {
         const LightObject* pLight = ((BasicStadium*)WorldManager::s_World)->m_pShadowLight;
         if (pLight != nullptr)

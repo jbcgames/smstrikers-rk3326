@@ -15,6 +15,8 @@
 #include "Game/Render/Jumbotron.h"
 #include "Game/Render/CrowdManager.h"
 #include "Game/WorldManager.h"
+#include "NL/nlTask.h"
+#include "port/GraphicsPresets.h"
 
 const u32 GLTT_BumpLocal_bit = 1 << (int)GLTT_BumpLocal;
 
@@ -397,6 +399,11 @@ void DrawableModel::DrawModel(const nlMatrix4& worldMatrix)
 
     if (bCrowd)
     {
+        if (Strikers_GetCutsceneCrowd() == 0 && nlIsCutsceneState())
+        {
+            return;
+        }
+
         litProgram = LitCrowdProgram;
         unlitProgram = UnlitCrowdProgram;
     }
@@ -997,6 +1004,11 @@ void DrawPlanarShadow(const glModel* model, const nlMatrix4& worldMatrix, float 
     }
 
     if (!g_bDrawPlanarShadows || shadowTranslucency <= 0.001f)
+    {
+        return;
+    }
+
+    if (Strikers_GetCutsceneShadows() == 0 && nlIsCutsceneState())
     {
         return;
     }

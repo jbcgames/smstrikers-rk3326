@@ -43,6 +43,18 @@ public:
     nlTaskManager() { }
 }; // total size: 0x1C
 
+extern bool g_bSuperStrikeActive;
+
+inline bool nlIsCutsceneState()
+{
+    if (g_bSuperStrikeActive) return true;
+    if (nlTaskManager::m_pInstance == nullptr) return false;
+    u32 state = nlTaskManager::m_pInstance->m_CurrState;
+    if (state == 0x100 || state == 0x10 || state == 0x20000) return true;
+    if (state == 1 && ((nlTaskManager::m_pInstance->m_PrevState & 0x110) || nlTaskManager::m_pInstance->m_PrevState == 0x20000)) return true;
+    return false;
+}
+
 extern u8 g_DoStackWatermarkTests;
 extern u8 g_StackWatermarkFiller;
 

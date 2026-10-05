@@ -20,6 +20,7 @@
 #include <math.h>
 #include <cstdlib>
 #include <cstring>
+#include "port/GraphicsPresets.h"
 
 static float sfGridTextureSize = 7.0f;
 static float sfNumGridSquares = 16.0f;
@@ -35,32 +36,12 @@ static bool sbUseSparksDuringElectricFenceFlyBy = true;
 
 static bool GetUseSparksDuringElectricFenceFlyBy()
 {
-    static int s_sparks = -1;
-    if (s_sparks < 0)
-    {
-        const char* e = getenv("STRIKERS_FENCE_SPARKS");
-        s_sparks = (e != nullptr && strcmp(e, "1") == 0) ? 1 : 0;
-    }
-    return s_sparks != 0;
+    return Strikers_GetFenceSparks() != 0;
 }
 
 static float GetTimeBetweenFenceEffects()
 {
-    static float s_time = -1.0f;
-    if (s_time < 0.0f)
-    {
-        const char* e = getenv("STRIKERS_FENCE_RATE");
-        if (e != nullptr && e[0] != '\0')
-        {
-            float val = (float)atof(e);
-            s_time = (val > 0.005f) ? val : 0.06f;
-        }
-        else
-        {
-            s_time = 0.06f;
-        }
-    }
-    return s_time;
+    return Strikers_GetFenceRate();
 }
 
 const unsigned long UnlitProgram = glGetProgram("3d unlit");

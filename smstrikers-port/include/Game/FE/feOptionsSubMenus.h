@@ -127,20 +127,24 @@ class OptionsGameplayMenuV2 : public OptionsSubMenu
 public:
     OptionsGameplayMenuV2(FEPresentation* presentation, ButtonComponent::ButtonState buttonstate, GameplaySettings& settings, int skilltoskip);
     virtual ~OptionsGameplayMenuV2();
+    virtual void Update(float dt);
     virtual void Save();
     virtual void Revert();
     virtual bool ChangesMade()
     {
         u32 checksum = nlChecksum32(&mSettings, sizeof(GameplaySettings));
-        return mSettingsCRC != checksum;
+        return (mSettingsCRC != checksum) || (mBackupControlPreset != mCurrentControlPreset);
     }
 
     void BuildSkillLevelMenu(TLComponentInstance* compinstance, int startindex, int skilltoskip);
+    void BuildControlPresetMenu(TLComponentInstance* compinstance, int startindex);
     void CloseItem(TLComponentInstance* compinstance);
     void OpenItem(TLComponentInstance* compinstance);
 
     /* 0x26C */ GameplaySettings& mSettings;
     /* 0x270 */ GameplaySettings mBackupSettings;
+    int mBackupControlPreset;
+    int mCurrentControlPreset;
 }; // total size: 0x27C
 
 class OptionsVisualMenuV2 : public OptionsSubMenu
@@ -154,11 +158,15 @@ public:
     virtual bool ChangesMade()
     {
         u32 checksum = nlChecksum32(&mSettings, sizeof(VisualSettings));
-        return mSettingsCRC != checksum;
+        return (mSettingsCRC != checksum) || (mBackupGraphicsPreset != mCurrentGraphicsPreset);
     }
+
+    void BuildGraphicsPresetMenu(TLComponentInstance* compinstance, int startindex);
 
     /* 0x26C */ VisualSettings& mSettings;
     /* 0x270 */ VisualSettings mBackupSettings;
+    int mBackupGraphicsPreset;
+    int mCurrentGraphicsPreset;
 }; // total size: 0x27C
 
 class OptionsAudioMenuV2 : public OptionsSubMenu

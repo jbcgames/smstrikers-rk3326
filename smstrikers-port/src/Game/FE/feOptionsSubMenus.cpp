@@ -13,6 +13,10 @@
 #include "Game/BaseGameSceneManager.h"
 #include "Game/FE/feFinder.h"
 #include "Game/FE/tlImageInstance.h"
+#include "Game/FE/tlTextInstance.h"
+#include "NL/nlLocalization.h"
+#include "port/GraphicsPresets.h"
+#include "port/ControlPresets.h"
 #include "types.h"
 
 typedef void FnTLComponentInstanceCb(TLComponentInstance*);
@@ -941,6 +945,117 @@ void OptionsAudioMenuV2::Update(float dt)
 /**
  * Offset/Address/Size: 0x19E0 | 0x800B6A24 | size: 0x6E8
  */
+static unsigned short s_labelPreset[32] = { 0 };
+static unsigned short s_presetNamesWide[4][32] = { { 0 } };
+static nlLocalization::nlLanguage s_lastPresetLang = (nlLocalization::nlLanguage)-1;
+
+static void EnsurePresetStringsInit()
+{
+    nlLocalization::nlLanguage curLang = g_pLocalization ? g_pLocalization->m_CurrentLanguage : nlLocalization::LangEnglish;
+    if (curLang != s_lastPresetLang)
+    {
+        s_lastPresetLang = curLang;
+        bool isSpanish = (curLang == nlLocalization::LangSpanish);
+        if (isSpanish)
+        {
+            nlStrToWcs("Rendimiento", s_labelPreset, 32);
+            nlStrToWcs("Ninguna", s_presetNamesWide[0], 32);
+            nlStrToWcs("Bajo", s_presetNamesWide[1], 32);
+            nlStrToWcs("Medio", s_presetNamesWide[2], 32);
+            nlStrToWcs("Alto", s_presetNamesWide[3], 32);
+        }
+        else
+        {
+            nlStrToWcs("Performance", s_labelPreset, 32);
+            nlStrToWcs("None", s_presetNamesWide[0], 32);
+            nlStrToWcs("Low", s_presetNamesWide[1], 32);
+            nlStrToWcs("Medium", s_presetNamesWide[2], 32);
+            nlStrToWcs("High", s_presetNamesWide[3], 32);
+        }
+    }
+}
+
+static unsigned short s_labelControls[32] = { 0 };
+static unsigned short s_controlNamesWide[4][32] = { { 0 } };
+static nlLocalization::nlLanguage s_lastControlLang = (nlLocalization::nlLanguage)-1;
+
+static void EnsureControlStringsInit()
+{
+    nlLocalization::nlLanguage curLang = g_pLocalization ? g_pLocalization->m_CurrentLanguage : nlLocalization::LangEnglish;
+    if (curLang != s_lastControlLang)
+    {
+        s_lastControlLang = curLang;
+        bool isSpanish = (curLang == nlLocalization::LangSpanish);
+        if (isSpanish)
+        {
+            nlStrToWcs("Controles", s_labelControls, 32);
+            nlStrToWcs("ArkOS", s_controlNamesWide[0], 32);
+            nlStrToWcs("Normal", s_controlNamesWide[1], 32);
+            nlStrToWcs("Cruceta", s_controlNamesWide[2], 32);
+            nlStrToWcs("Invertir", s_controlNamesWide[3], 32);
+        }
+        else
+        {
+            nlStrToWcs("Controls", s_labelControls, 32);
+            nlStrToWcs("ArkOS", s_controlNamesWide[0], 32);
+            nlStrToWcs("Normal", s_controlNamesWide[1], 32);
+            nlStrToWcs("D-Pad", s_controlNamesWide[2], 32);
+            nlStrToWcs("Swap Sticks", s_controlNamesWide[3], 32);
+        }
+    }
+}
+
+static void SetAllTextInComponent(TLComponentInstance* comp, const unsigned short* wstr)
+{
+    if (!comp || !comp->GetActiveSlide()) return;
+
+    TLSlide* firstSlide = comp->GetActiveSlide();
+    TLSlide* slide = firstSlide;
+    do
+    {
+        comp->SetActiveSlide(slide);
+        TLInstance* firstInst = comp->GetActiveSlide()->m_instances;
+        if (firstInst)
+        {
+            TLInstance* inst = firstInst;
+            do
+            {
+                if (inst->m_type == TLAT_TEXT)
+                {
+                    ((TLTextInstance*)inst)->SetString(wstr);
+                }
+                else if (inst->m_type == TLAT_COMPONENT)
+                {
+                    SetAllTextInComponent((TLComponentInstance*)inst, wstr);
+                }
+                inst = inst->m_next;
+            } while (inst && inst != firstInst);
+        }
+        slide = slide->m_next;
+    } while (slide && slide != firstSlide);
+    comp->SetActiveSlide(firstSlide);
+}
+
+void OptionsVisualMenuV2::BuildGraphicsPresetMenu(TLComponentInstance* compinstance, int startindex)
+{
+    SlideMenuList* list = new (nlMalloc(sizeof(SlideMenuList), 8, false)) SlideMenuList(compinstance);
+    mSlideMenuLists[2] = list;
+
+    compinstance->SetActiveSlide("Slide1");
+    unsigned long slideHash = compinstance->GetActiveSlide()->m_hash;
+
+    for (int i = 0; i < 4; i++)
+    {
+        list->AddItem(slideHash, i);
+    }
+
+    list->SetItem(startindex);
+    list->SetFlag(1); // wrap around
+}
+
+/**
+ * Offset/Address/Size: 0x19E0 | 0x800B6A24 | size: 0x6E8
+ */
 OptionsVisualMenuV2::OptionsVisualMenuV2(FEPresentation* pres, ButtonComponent::ButtonState btnState, VisualSettings& settings)
     : OptionsSubMenu(pres, btnState)
     , mSettings(settings)
@@ -1023,9 +1138,15 @@ OptionsVisualMenuV2::OptionsVisualMenuV2(FEPresentation* pres, ButtonComponent::
         InlineHasher(nlStringLowerHash("Layer")),
         InlineHasher(nlStringLowerHash("ASPECT")));
 
-    BuildSubMenuList(2, compinstance, true, mSettings.mIsWidescreen ? 1 : 0);
+    mCurrentGraphicsPreset = Strikers_GetCurrentGraphicsPreset();
+    mBackupGraphicsPreset = mCurrentGraphicsPreset;
+    BuildGraphicsPresetMenu(compinstance, mCurrentGraphicsPreset);
     compinstance->m_bVisible = true;
     mMenuItems.GetMenuItem(2)->GetType()->m_bVisible = true;
+
+    EnsurePresetStringsInit();
+    SetAllTextInComponent(mMenuItems.GetMenuItem(2)->GetType(), s_labelPreset);
+    SetAllTextInComponent(compinstance, s_presetNamesWide[mCurrentGraphicsPreset]);
 
     ColourAllText(SubMenuHighliteColour, mMenuItems.GetActiveItemIndex());
 
@@ -1048,44 +1169,63 @@ void OptionsVisualMenuV2::Update(float dt)
     OptionsSubMenu::Update(dt);
 
     MenuItem<TLComponentInstance>* menuItem = mMenuItems.GetMenuItem(1);
-    if (menuItem == NULL)
-        return;
-
-    int userEnumType;
-    SlideMenuList* list = (SlideMenuList*)mSlideMenuLists[0];
-    if (list != NULL)
+    if (menuItem != NULL)
     {
-        userEnumType = list->GetMenuItem()->GetType()->GetUserEnumType();
-    }
-    else
-    {
-        userEnumType = -1;
-    }
-
-    if (userEnumType == 0)
-    {
-        TLComponentInstance* compInstance = menuItem->GetType();
-        if (compInstance->m_bVisible != false)
+        int userEnumType;
+        SlideMenuList* list = (SlideMenuList*)mSlideMenuLists[0];
+        if (list != NULL)
         {
-            compInstance->m_bVisible = false;
-            menuItem->SetDisabledFlag(true);
+            userEnumType = list->GetMenuItem()->GetType()->GetUserEnumType();
+        }
+        else
+        {
+            userEnumType = -1;
+        }
 
-            SlideMenuList* list2 = (SlideMenuList*)mSlideMenuLists[1];
-            TLComponentInstance* compInstance2 = list2->GetComponentInstance();
-            compInstance2->m_bVisible = false;
+        if (userEnumType == 0)
+        {
+            TLComponentInstance* compInstance = menuItem->GetType();
+            if (compInstance->m_bVisible != false)
+            {
+                compInstance->m_bVisible = false;
+                menuItem->SetDisabledFlag(true);
+
+                SlideMenuList* list2 = (SlideMenuList*)mSlideMenuLists[1];
+                TLComponentInstance* compInstance2 = list2->GetComponentInstance();
+                compInstance2->m_bVisible = false;
+            }
+        }
+        else
+        {
+            TLComponentInstance* compInstance = menuItem->GetType();
+            if (compInstance->m_bVisible == false)
+            {
+                compInstance->m_bVisible = true;
+                menuItem->SetDisabledFlag(false);
+
+                SlideMenuList* list2 = (SlideMenuList*)mSlideMenuLists[1];
+                TLComponentInstance* compInstance2 = list2->GetComponentInstance();
+                compInstance2->m_bVisible = true;
+            }
         }
     }
-    else
-    {
-        TLComponentInstance* compInstance = menuItem->GetType();
-        if (compInstance->m_bVisible == false)
-        {
-            compInstance->m_bVisible = true;
-            menuItem->SetDisabledFlag(false);
 
-            SlideMenuList* list2 = (SlideMenuList*)mSlideMenuLists[1];
-            TLComponentInstance* compInstance2 = list2->GetComponentInstance();
-            compInstance2->m_bVisible = true;
+    // Keep Row 2 label and value text dynamically refreshed
+    EnsurePresetStringsInit();
+
+    MenuItem<TLComponentInstance>* row2Item = mMenuItems.GetMenuItem(2);
+    if (row2Item != NULL && row2Item->GetType() != NULL)
+    {
+        SetAllTextInComponent(row2Item->GetType(), s_labelPreset);
+    }
+
+    SlideMenuList* presetList = (SlideMenuList*)mSlideMenuLists[2];
+    if (presetList != NULL && presetList->GetComponentInstance() != NULL)
+    {
+        int presetIdx = presetList->GetMenuItem()->GetType()->GetUserEnumType();
+        if (presetIdx >= 0 && presetIdx <= 3)
+        {
+            SetAllTextInComponent(presetList->GetComponentInstance(), s_presetNamesWide[presetIdx]);
         }
     }
 }
@@ -1129,7 +1269,11 @@ void OptionsVisualMenuV2::Save()
     {
         val = -1;
     }
-    mSettings.mIsWidescreen = (val != 0);
+    if (val >= 0 && val <= 3)
+    {
+        mCurrentGraphicsPreset = val;
+        Strikers_ApplyGraphicsPreset(val, true);
+    }
 }
 
 /**
@@ -1138,6 +1282,11 @@ void OptionsVisualMenuV2::Save()
 void OptionsVisualMenuV2::Revert()
 {
     memcpy(&mSettings, &mBackupSettings, sizeof(VisualSettings));
+    if (mBackupGraphicsPreset != mCurrentGraphicsPreset)
+    {
+        mCurrentGraphicsPreset = mBackupGraphicsPreset;
+        Strikers_ApplyGraphicsPreset(mBackupGraphicsPreset, true);
+    }
 }
 
 /**
@@ -1248,7 +1397,14 @@ OptionsGameplayMenuV2::OptionsGameplayMenuV2(FEPresentation* presentation, Butto
         currentSlide,
         InlineHasher(nlStringLowerHash("Layer")),
         InlineHasher(nlStringLowerHash("RUMBLE")));
-    BuildSubMenuList(4, compinstance, true, settings.RumbleEnabled ? 0 : 1);
+
+    mCurrentControlPreset = Strikers_GetCurrentControlPreset();
+    mBackupControlPreset = mCurrentControlPreset;
+    BuildControlPresetMenu(compinstance, mCurrentControlPreset);
+
+    EnsureControlStringsInit();
+    SetAllTextInComponent(mMenuItems.GetMenuItem(4)->GetType(), s_labelControls);
+    SetAllTextInComponent(compinstance, s_controlNamesWide[mCurrentControlPreset]);
 
     compinstance = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
         currentSlide,
@@ -1260,6 +1416,23 @@ OptionsGameplayMenuV2::OptionsGameplayMenuV2(FEPresentation* presentation, Butto
 
     memcpy(&mBackupSettings, &mSettings, sizeof(GameplaySettings));
     mSettingsCRC = nlChecksum32(&mBackupSettings, sizeof(GameplaySettings));
+}
+
+void OptionsGameplayMenuV2::BuildControlPresetMenu(TLComponentInstance* compinstance, int startindex)
+{
+    SlideMenuList* list = new (nlMalloc(sizeof(SlideMenuList), 8, false)) SlideMenuList(compinstance);
+    mSlideMenuLists[4] = list;
+
+    compinstance->SetActiveSlide("Slide1");
+    unsigned long slideHash = compinstance->GetActiveSlide()->m_hash;
+
+    for (int i = 0; i < 4; i++)
+    {
+        list->AddItem(slideHash, i);
+    }
+
+    list->SetItem(startindex);
+    list->SetFlag(1); // wrap around
 }
 
 /**
@@ -1308,6 +1481,29 @@ void OptionsGameplayMenuV2::BuildSkillLevelMenu(TLComponentInstance* compinstanc
  */
 OptionsGameplayMenuV2::~OptionsGameplayMenuV2()
 {
+}
+
+void OptionsGameplayMenuV2::Update(float dt)
+{
+    OptionsSubMenu::Update(dt);
+
+    EnsureControlStringsInit();
+
+    MenuItem<TLComponentInstance>* row4Item = mMenuItems.GetMenuItem(4);
+    if (row4Item != NULL && row4Item->GetType() != NULL)
+    {
+        SetAllTextInComponent(row4Item->GetType(), s_labelControls);
+    }
+
+    SlideMenuList* controlList = (SlideMenuList*)mSlideMenuLists[4];
+    if (controlList != NULL && controlList->GetComponentInstance() != NULL)
+    {
+        int presetIdx = controlList->GetMenuItem()->GetType()->GetUserEnumType();
+        if (presetIdx >= 0 && presetIdx <= 3)
+        {
+            SetAllTextInComponent(controlList->GetComponentInstance(), s_controlNamesWide[presetIdx]);
+        }
+    }
 }
 
 /**
@@ -1396,7 +1592,12 @@ void OptionsGameplayMenuV2::Save()
     {
         val = -1;
     }
-    localSettings.RumbleEnabled = (val == 0);
+    if (val >= 0 && val <= 3)
+    {
+        mCurrentControlPreset = val;
+        Strikers_ApplyControlPreset(val, true);
+    }
+    localSettings.RumbleEnabled = false;
 
     list = (SlideMenuList*)mSlideMenuLists[5];
     if (list != NULL)
@@ -1423,6 +1624,12 @@ void OptionsGameplayMenuV2::Revert()
     memcpy(&mSettings, &mBackupSettings, sizeof(GameplaySettings));
     mSettings.OnSettingsUpdated();
     cPlatPad::m_bDisableRumble = !mSettings.RumbleEnabled;
+
+    if (mBackupControlPreset != mCurrentControlPreset)
+    {
+        mCurrentControlPreset = mBackupControlPreset;
+        Strikers_ApplyControlPreset(mBackupControlPreset, true);
+    }
 }
 
 void OptionsGameplayMenuV2::OpenItem(TLComponentInstance* compinstance)
