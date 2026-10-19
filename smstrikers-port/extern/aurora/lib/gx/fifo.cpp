@@ -75,8 +75,15 @@ void drain() {
   static int s_drain_c = 0;
   if (++s_drain_c >= 30) {
     s_drain_c = 0;
-    std::fprintf(stdout, "[FIFO-DEBUG] buffer size: %u bytes (%u KB)\n", detail::sBufferSize, detail::sBufferSize / 1024);
-    std::fflush(stdout);
+    static int s_debug_fifo = -1;
+    if (s_debug_fifo < 0) {
+      const char* v = std::getenv("STRIKERS_DEBUG_PERF");
+      s_debug_fifo = (v && std::strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    if (s_debug_fifo) {
+      std::fprintf(stdout, "[FIFO-DEBUG] buffer size: %u bytes (%u KB)\n", detail::sBufferSize, detail::sBufferSize / 1024);
+      std::fflush(stdout);
+    }
   }
   process(detail::sBufferData, detail::sBufferSize, true);
   detail::sBufferSize = 0;

@@ -17,6 +17,7 @@
 #include "NL/nlLocalization.h"
 #include "port/GraphicsPresets.h"
 #include "port/ControlPresets.h"
+#include "port/fe_clone.h"
 #include "types.h"
 
 typedef void FnTLComponentInstanceCb(TLComponentInstance*);
@@ -975,6 +976,39 @@ static void EnsurePresetStringsInit()
     }
 }
 
+static unsigned short s_labelResolution[32] = { 0 };
+static unsigned short s_resolutionNamesWide[5][32] = { { 0 } };
+static nlLocalization::nlLanguage s_lastResolutionLang = (nlLocalization::nlLanguage)-1;
+
+static void EnsureResolutionStringsInit()
+{
+    nlLocalization::nlLanguage curLang = g_pLocalization ? g_pLocalization->m_CurrentLanguage : nlLocalization::LangEnglish;
+    if (curLang != s_lastResolutionLang)
+    {
+        s_lastResolutionLang = curLang;
+        bool isSpanish = (curLang == nlLocalization::LangSpanish);
+        if (isSpanish)
+        {
+            static const unsigned short s_labelResEs[] = { 'R', 'e', 's', 'o', 'l', 'u', 'c', 'i', 0x00F3, 'n', 0 };
+            memcpy(s_labelResolution, s_labelResEs, sizeof(s_labelResEs));
+            nlStrToWcs("Auto", s_resolutionNamesWide[0], 32);
+            nlStrToWcs("4:3", s_resolutionNamesWide[1], 32);
+            nlStrToWcs("16:9", s_resolutionNamesWide[2], 32);
+            nlStrToWcs("1:1", s_resolutionNamesWide[3], 32);
+            nlStrToWcs("3:2", s_resolutionNamesWide[4], 32);
+        }
+        else
+        {
+            nlStrToWcs("Resolution", s_labelResolution, 32);
+            nlStrToWcs("Auto", s_resolutionNamesWide[0], 32);
+            nlStrToWcs("4:3", s_resolutionNamesWide[1], 32);
+            nlStrToWcs("16:9", s_resolutionNamesWide[2], 32);
+            nlStrToWcs("1:1", s_resolutionNamesWide[3], 32);
+            nlStrToWcs("3:2", s_resolutionNamesWide[4], 32);
+        }
+    }
+}
+
 static unsigned short s_labelControls[32] = { 0 };
 static unsigned short s_controlNamesWide[4][32] = { { 0 } };
 static nlLocalization::nlLanguage s_lastControlLang = (nlLocalization::nlLanguage)-1;
@@ -1045,6 +1079,66 @@ void OptionsVisualMenuV2::BuildGraphicsPresetMenu(TLComponentInstance* compinsta
     unsigned long slideHash = compinstance->GetActiveSlide()->m_hash;
 
     for (int i = 0; i < 4; i++)
+    {
+        list->AddItem(slideHash, i);
+    }
+
+    list->SetItem(startindex);
+    list->SetFlag(1); // wrap around
+}
+
+static unsigned short s_labelReplays[32] = { 0 };
+static unsigned short s_replayNamesWide[2][32] = { { 0 } };
+static nlLocalization::nlLanguage s_lastReplayLang = (nlLocalization::nlLanguage)-1;
+
+static void EnsureReplayStringsInit()
+{
+    nlLocalization::nlLanguage curLang = g_pLocalization ? g_pLocalization->m_CurrentLanguage : nlLocalization::LangEnglish;
+    if (curLang != s_lastReplayLang)
+    {
+        s_lastReplayLang = curLang;
+        bool isSpanish = (curLang == nlLocalization::LangSpanish);
+        if (isSpanish)
+        {
+            nlStrToWcs("Repeticiones", s_labelReplays, 32);
+            nlStrToWcs("Activadas", s_replayNamesWide[0], 32);
+            nlStrToWcs("Desactivadas", s_replayNamesWide[1], 32);
+        }
+        else
+        {
+            nlStrToWcs("Replays", s_labelReplays, 32);
+            nlStrToWcs("Enabled", s_replayNamesWide[0], 32);
+            nlStrToWcs("Disabled", s_replayNamesWide[1], 32);
+        }
+    }
+}
+
+void OptionsVisualMenuV2::BuildReplayMenu(TLComponentInstance* compinstance, int startindex)
+{
+    SlideMenuList* list = new (nlMalloc(sizeof(SlideMenuList), 8, false)) SlideMenuList(compinstance);
+    mSlideMenuLists[3] = list;
+
+    compinstance->SetActiveSlide("Slide1");
+    unsigned long slideHash = compinstance->GetActiveSlide()->m_hash;
+
+    for (int i = 0; i < 2; i++)
+    {
+        list->AddItem(slideHash, i);
+    }
+
+    list->SetItem(startindex);
+    list->SetFlag(1); // wrap around
+}
+
+void OptionsVisualMenuV2::BuildResolutionPresetMenu(TLComponentInstance* compinstance, int startindex)
+{
+    SlideMenuList* list = new (nlMalloc(sizeof(SlideMenuList), 8, false)) SlideMenuList(compinstance);
+    mSlideMenuLists[1] = list;
+
+    compinstance->SetActiveSlide("Slide1");
+    unsigned long slideHash = compinstance->GetActiveSlide()->m_hash;
+
+    for (int i = 0; i < 5; i++)
     {
         list->AddItem(slideHash, i);
     }
@@ -1124,29 +1218,128 @@ OptionsVisualMenuV2::OptionsVisualMenuV2(FEPresentation* pres, ButtonComponent::
     compinstance->m_bVisible = true;
     mMenuItems.GetMenuItem(0)->GetType()->m_bVisible = true;
 
-    compinstance = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
-        currentSlide,
-        InlineHasher(nlStringLowerHash("Layer")),
-        InlineHasher(nlStringLowerHash("ZOOM")));
-
-    BuildSubMenuList(1, compinstance, false, (int)(10.0f * mSettings.mCameraZoomLevel));
-    compinstance->m_bVisible = true;
-    mMenuItems.GetMenuItem(1)->GetType()->m_bVisible = true;
-
-    compinstance = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
+    // Row 2 is ASPECT (Performance Preset, also provides text component template)
+    TLComponentInstance* aspectComp = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
         currentSlide,
         InlineHasher(nlStringLowerHash("Layer")),
         InlineHasher(nlStringLowerHash("ASPECT")));
 
+    // Hide original ZOOM slider which lacks TLTextInstance
+    TLComponentInstance* zoomComp = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
+        currentSlide,
+        InlineHasher(nlStringLowerHash("Layer")),
+        InlineHasher(nlStringLowerHash("ZOOM")));
+    if (zoomComp != NULL)
+    {
+        zoomComp->m_bVisible = false;
+    }
+
+    // Reuse or create cloned text component for Resolution (RESO_VALUE)
+    TLComponentInstance* resValueComp = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
+        currentSlide,
+        InlineHasher(nlStringLowerHash("Layer")),
+        InlineHasher(nlStringLowerHash("RESO_VALUE")));
+
+    if (resValueComp == NULL && aspectComp != NULL)
+    {
+        resValueComp = (TLComponentInstance*)PortFEClone(aspectComp, "RESO_VALUE");
+        if (resValueComp != NULL)
+        {
+            PortFEInsertAfter(aspectComp, resValueComp);
+        }
+    }
+
+    TLComponentInstance* targetResComp = (resValueComp != NULL) ? resValueComp : zoomComp;
+    if (targetResComp != NULL)
+    {
+        targetResComp->m_bVisible = true;
+        targetResComp->SetAssetPosition(136.0f, 4.0f, 0.0f);
+    }
+    mMenuItems.GetMenuItem(1)->GetType()->m_bVisible = true;
+
+    mCurrentResolutionPreset = Strikers_GetCurrentResolutionPreset();
+    mBackupResolutionPreset = mCurrentResolutionPreset;
+    BuildResolutionPresetMenu(targetResComp, mCurrentResolutionPreset);
+
+    EnsureResolutionStringsInit();
+    SetAllTextInComponent(mMenuItems.GetMenuItem(1)->GetType(), s_labelResolution);
+    SetAllTextInComponent(targetResComp, s_resolutionNamesWide[mCurrentResolutionPreset]);
+
     mCurrentGraphicsPreset = Strikers_GetCurrentGraphicsPreset();
     mBackupGraphicsPreset = mCurrentGraphicsPreset;
-    BuildGraphicsPresetMenu(compinstance, mCurrentGraphicsPreset);
-    compinstance->m_bVisible = true;
+    BuildGraphicsPresetMenu(aspectComp, mCurrentGraphicsPreset);
+    aspectComp->m_bVisible = true;
     mMenuItems.GetMenuItem(2)->GetType()->m_bVisible = true;
 
     EnsurePresetStringsInit();
     SetAllTextInComponent(mMenuItems.GetMenuItem(2)->GetType(), s_labelPreset);
-    SetAllTextInComponent(compinstance, s_presetNamesWide[mCurrentGraphicsPreset]);
+    SetAllTextInComponent(aspectComp, s_presetNamesWide[mCurrentGraphicsPreset]);
+
+    // Row 3: Replays (MENU ITEM_REPLAY, REPLAY_VALUE)
+    TLComponentInstance* item4Inst = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
+        currentSlide,
+        InlineHasher(nlStringLowerHash("Layer")),
+        InlineHasher(nlStringLowerHash("MENU ITEM4")));
+
+    TLComponentInstance* replayItemInst = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
+        currentSlide,
+        InlineHasher(nlStringLowerHash("Layer")),
+        InlineHasher(nlStringLowerHash("MENU ITEM_REPLAY")));
+
+    if (replayItemInst == NULL && item4Inst != NULL)
+    {
+        replayItemInst = (TLComponentInstance*)PortFEClone(item4Inst, "MENU ITEM_REPLAY");
+        if (replayItemInst != NULL)
+        {
+            PortFEInsertAfter(item4Inst, replayItemInst);
+        }
+    }
+
+    if (replayItemInst != NULL)
+    {
+        replayItemInst->m_bVisible = true;
+        replayItemInst->SetAssetPosition(-40.0f, -76.0f, 0.0f);
+
+        MenuItem<TLComponentInstance>* menuItem = mMenuItems.AddItem(replayItemInst);
+        menuItem->SetCallback(ON_HIGHLIGHT, SingleHighlite::OpenItem);
+        menuItem->SetCallback(ON_UNHIGHLIGHT, SingleHighlite::CloseItem);
+        menuItem->RunCallback(ON_UNHIGHLIGHT);
+        mSlideMenuLists[3] = NULL;
+    }
+
+    TLComponentInstance* replayValueComp = FEFinder<TLComponentInstance, 4>::Find<TLSlide>(
+        currentSlide,
+        InlineHasher(nlStringLowerHash("Layer")),
+        InlineHasher(nlStringLowerHash("REPLAY_VALUE")));
+
+    if (replayValueComp == NULL && aspectComp != NULL)
+    {
+        replayValueComp = (TLComponentInstance*)PortFEClone(aspectComp, "REPLAY_VALUE");
+        if (replayValueComp != NULL)
+        {
+            PortFEInsertAfter(aspectComp, replayValueComp);
+        }
+    }
+
+    if (replayValueComp != NULL)
+    {
+        replayValueComp->m_bVisible = true;
+        replayValueComp->SetAssetPosition(136.0f, -76.0f, 0.0f);
+    }
+
+    mCurrentReplaysEnabled = Strikers_GetReplaysEnabled();
+    mBackupReplaysEnabled = mCurrentReplaysEnabled;
+    BuildReplayMenu(replayValueComp, (mCurrentReplaysEnabled != 0 ? 0 : 1));
+
+    EnsureReplayStringsInit();
+    if (replayItemInst != NULL)
+    {
+        SetAllTextInComponent(replayItemInst, s_labelReplays);
+    }
+    if (replayValueComp != NULL)
+    {
+        SetAllTextInComponent(replayValueComp, s_replayNamesWide[mCurrentReplaysEnabled != 0 ? 0 : 1]);
+    }
 
     ColourAllText(SubMenuHighliteColour, mMenuItems.GetActiveItemIndex());
 
@@ -1168,49 +1361,30 @@ void OptionsVisualMenuV2::Update(float dt)
 {
     OptionsSubMenu::Update(dt);
 
-    MenuItem<TLComponentInstance>* menuItem = mMenuItems.GetMenuItem(1);
-    if (menuItem != NULL)
+    // Keep Row 1 (Resolution) label and value text dynamically refreshed
+    EnsureResolutionStringsInit();
+
+    MenuItem<TLComponentInstance>* row1Item = mMenuItems.GetMenuItem(1);
+    if (row1Item != NULL && row1Item->GetType() != NULL)
     {
-        int userEnumType;
-        SlideMenuList* list = (SlideMenuList*)mSlideMenuLists[0];
-        if (list != NULL)
-        {
-            userEnumType = list->GetMenuItem()->GetType()->GetUserEnumType();
-        }
-        else
-        {
-            userEnumType = -1;
-        }
+        row1Item->GetType()->m_bVisible = true;
+        row1Item->SetDisabledFlag(false);
+        SetAllTextInComponent(row1Item->GetType(), s_labelResolution);
+    }
 
-        if (userEnumType == 0)
+    SlideMenuList* resList = (SlideMenuList*)mSlideMenuLists[1];
+    if (resList != NULL && resList->GetComponentInstance() != NULL)
+    {
+        resList->GetComponentInstance()->m_bVisible = true;
+        resList->GetComponentInstance()->SetAssetPosition(136.0f, 4.0f, 0.0f);
+        int resIdx = resList->GetMenuItem()->GetType()->GetUserEnumType();
+        if (resIdx >= 0 && resIdx <= 4)
         {
-            TLComponentInstance* compInstance = menuItem->GetType();
-            if (compInstance->m_bVisible != false)
-            {
-                compInstance->m_bVisible = false;
-                menuItem->SetDisabledFlag(true);
-
-                SlideMenuList* list2 = (SlideMenuList*)mSlideMenuLists[1];
-                TLComponentInstance* compInstance2 = list2->GetComponentInstance();
-                compInstance2->m_bVisible = false;
-            }
-        }
-        else
-        {
-            TLComponentInstance* compInstance = menuItem->GetType();
-            if (compInstance->m_bVisible == false)
-            {
-                compInstance->m_bVisible = true;
-                menuItem->SetDisabledFlag(false);
-
-                SlideMenuList* list2 = (SlideMenuList*)mSlideMenuLists[1];
-                TLComponentInstance* compInstance2 = list2->GetComponentInstance();
-                compInstance2->m_bVisible = true;
-            }
+            SetAllTextInComponent(resList->GetComponentInstance(), s_resolutionNamesWide[resIdx]);
         }
     }
 
-    // Keep Row 2 label and value text dynamically refreshed
+    // Keep Row 2 (Preset) label and value text dynamically refreshed
     EnsurePresetStringsInit();
 
     MenuItem<TLComponentInstance>* row2Item = mMenuItems.GetMenuItem(2);
@@ -1226,6 +1400,30 @@ void OptionsVisualMenuV2::Update(float dt)
         if (presetIdx >= 0 && presetIdx <= 3)
         {
             SetAllTextInComponent(presetList->GetComponentInstance(), s_presetNamesWide[presetIdx]);
+        }
+    }
+
+    // Keep Row 3 (Replays) label and value text dynamically refreshed
+    EnsureReplayStringsInit();
+
+    MenuItem<TLComponentInstance>* row3Item = mMenuItems.GetMenuItem(3);
+    if (row3Item != NULL && row3Item->GetType() != NULL)
+    {
+        row3Item->GetType()->m_bVisible = true;
+        row3Item->SetDisabledFlag(false);
+        row3Item->GetType()->SetAssetPosition(-40.0f, -76.0f, 0.0f);
+        SetAllTextInComponent(row3Item->GetType(), s_labelReplays);
+    }
+
+    SlideMenuList* replayList = (SlideMenuList*)mSlideMenuLists[3];
+    if (replayList != NULL && replayList->GetComponentInstance() != NULL)
+    {
+        replayList->GetComponentInstance()->m_bVisible = true;
+        replayList->GetComponentInstance()->SetAssetPosition(136.0f, -76.0f, 0.0f);
+        int replayIdx = replayList->GetMenuItem()->GetType()->GetUserEnumType();
+        if (replayIdx >= 0 && replayIdx <= 1)
+        {
+            SetAllTextInComponent(replayList->GetComponentInstance(), s_replayNamesWide[replayIdx]);
         }
     }
 }
@@ -1258,7 +1456,11 @@ void OptionsVisualMenuV2::Save()
     {
         val = -1;
     }
-    mSettings.mCameraZoomLevel = (float)val / 10.0f;
+    if (val >= 0 && val <= 4)
+    {
+        mCurrentResolutionPreset = val;
+        Strikers_ApplyResolutionPreset(val, true);
+    }
 
     list = (SlideMenuList*)mSlideMenuLists[2];
     if (list != NULL)
@@ -1274,6 +1476,21 @@ void OptionsVisualMenuV2::Save()
         mCurrentGraphicsPreset = val;
         Strikers_ApplyGraphicsPreset(val, true);
     }
+
+    list = (SlideMenuList*)mSlideMenuLists[3];
+    if (list != NULL)
+    {
+        val = list->GetMenuItem()->GetType()->GetUserEnumType();
+    }
+    else
+    {
+        val = -1;
+    }
+    if (val >= 0 && val <= 1)
+    {
+        mCurrentReplaysEnabled = (val == 0 ? 1 : 0);
+        Strikers_SetReplaysEnabled(mCurrentReplaysEnabled);
+    }
 }
 
 /**
@@ -1282,10 +1499,35 @@ void OptionsVisualMenuV2::Save()
 void OptionsVisualMenuV2::Revert()
 {
     memcpy(&mSettings, &mBackupSettings, sizeof(VisualSettings));
+    if (mBackupResolutionPreset != mCurrentResolutionPreset)
+    {
+        mCurrentResolutionPreset = mBackupResolutionPreset;
+        Strikers_ApplyResolutionPreset(mBackupResolutionPreset, true);
+        SlideMenuList* resList = (SlideMenuList*)mSlideMenuLists[1];
+        if (resList != NULL)
+        {
+            resList->SetItem(mBackupResolutionPreset);
+        }
+    }
     if (mBackupGraphicsPreset != mCurrentGraphicsPreset)
     {
         mCurrentGraphicsPreset = mBackupGraphicsPreset;
         Strikers_ApplyGraphicsPreset(mBackupGraphicsPreset, true);
+        SlideMenuList* presetList = (SlideMenuList*)mSlideMenuLists[2];
+        if (presetList != NULL)
+        {
+            presetList->SetItem(mBackupGraphicsPreset);
+        }
+    }
+    if (mBackupReplaysEnabled != mCurrentReplaysEnabled)
+    {
+        mCurrentReplaysEnabled = mBackupReplaysEnabled;
+        Strikers_SetReplaysEnabled(mBackupReplaysEnabled);
+        SlideMenuList* replayList = (SlideMenuList*)mSlideMenuLists[3];
+        if (replayList != NULL)
+        {
+            replayList->SetItem(mBackupReplaysEnabled != 0 ? 0 : 1);
+        }
     }
 }
 

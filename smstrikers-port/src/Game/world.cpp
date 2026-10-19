@@ -1591,6 +1591,7 @@ void World::Render()
 
     delete iter;
 
+#if defined(DEBUG)
     if (nlIsCutsceneState())
     {
         static unsigned long s_lastCutsceneLog = 0;
@@ -1601,6 +1602,7 @@ void World::Render()
                     s_lastCutsceneLog, nSubmitted, nSubmitted - nDrawn, nDrawn);
         }
     }
+#endif
 
     if (g_bDrawCullingInfo)
     {

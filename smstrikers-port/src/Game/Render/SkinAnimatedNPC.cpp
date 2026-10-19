@@ -9,11 +9,14 @@
 #include "NL/gl/glState.h"
 #include "Game/SAnim/pnSAnimController.h"
 #include "Game/SAnim/pnBlender.h"
+#include "NL/nlTask.h"
+#include "port/GraphicsPresets.h"
 #include "types.h"
 
 extern GLInventory glInventory;
 extern float GetPlanarShadowOpacity();
 extern void DrawPlanarShadow(const glModel*, const nlMatrix4&, float, bool, bool, bool, uintptr_t);
+extern bool g_bDrawPlanarShadows;
 
 const u32 GLTT_BumpLocal_bit = 1 << (int)GLTT_BumpLocal;
 
@@ -146,11 +149,18 @@ void SkinAnimatedNPC::SendToGL() const
  */
 void SkinAnimatedNPC::DrawShadow(const cPoseAccumulator& poseAccumulator, const nlMatrix4& worldMatrix)
 {
+    if (!g_bDrawPlanarShadows || Strikers_GetGameplayShadows() == 0)
+        return;
+    if (Strikers_GetCutsceneShadows() == 0 && nlIsCutsceneState())
+        return;
+    float opacity = GetPlanarShadowOpacity();
+    if (opacity <= 0.001f)
+        return;
+
     GLSkinMesh* skinMesh = mpSkinMesh;
     unsigned long prog = glGetProgram("3d unlit");
     skinMesh->PrepareToRender(prog, 0);
     glModel* pModel = glModelDup(skinMesh->pModel, true);
-    float opacity = GetPlanarShadowOpacity();
     DrawPlanarShadow(pModel, worldMatrix, opacity, false, true, true, (uintptr_t)this);
 }
 
@@ -179,7 +189,14 @@ void SkinAnimatedNPC::SetAnimState(cSAnim& pAnim, float fBlendTime, ePlayMode pl
  */
 void SkinAnimatedNPC::DrawShadow(const glModel* pModel, const nlMatrix4& matrix)
 {
-    glModel* dup = glModelDupNoStreams(pModel, true, false);
+    if (!g_bDrawPlanarShadows || Strikers_GetGameplayShadows() == 0)
+        return;
+    if (Strikers_GetCutsceneShadows() == 0 && nlIsCutsceneState())
+        return;
     float opacity = GetPlanarShadowOpacity();
+    if (opacity <= 0.001f)
+        return;
+
+    glModel* dup = glModelDupNoStreams(pModel, true, false);
     DrawPlanarShadow(dup, matrix, opacity, false, true, true, (uintptr_t)this);
 }

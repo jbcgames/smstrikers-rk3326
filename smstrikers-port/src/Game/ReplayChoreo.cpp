@@ -7,6 +7,7 @@
 #include "NL/nlDebug.h"
 #include "NL/nlFormat.h"
 #include "NL/nlTask.h"
+#include "port/GraphicsPresets.h"
 
 struct GoalScoredDataExt
 {
@@ -291,6 +292,11 @@ BasicString<char, Detail::TempStringAllocator> ReplayChoreo::CalcAutoReplayScrip
  */
 void ReplayChoreo::StartAutoReplay(ReplayType rt)
 {
+    if (Strikers_GetReplaysEnabled() == 0)
+    {
+        return;
+    }
+
     mReplayManager = ReplayManager::Instance();
     mReplay = mReplayManager->mReplay;
 
@@ -430,6 +436,11 @@ void ReplayChoreo::RunTill(ReplayEvent event, float timeOffset)
  */
 bool ReplayChoreo::Done() const
 {
+    if (Strikers_GetReplaysEnabled() == 0)
+    {
+        return true;
+    }
+
     bool result = false;
     if (IsFinished())
     {

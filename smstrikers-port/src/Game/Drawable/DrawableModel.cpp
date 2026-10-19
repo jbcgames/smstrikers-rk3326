@@ -1003,7 +1003,7 @@ void DrawPlanarShadow(const glModel* model, const nlMatrix4& worldMatrix, float 
         RenderBoundingBox(model, worldMatrix);
     }
 
-    if (!g_bDrawPlanarShadows || shadowTranslucency <= 0.001f)
+    if (!g_bDrawPlanarShadows || shadowTranslucency <= 0.001f || Strikers_GetGameplayShadows() == 0)
     {
         return;
     }

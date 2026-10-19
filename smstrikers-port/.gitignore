@@ -18,3 +18,14 @@ data/
 *.elf
 strikers
 strikers.exe
+
+# Local development / deployment scripts
+.idea/
+*.iml
+check_status.sh
+deploy_settings.sh
+deploy_test.sh
+reset_default_options.sh
+test_169.sh
+test_aspect.sh
+

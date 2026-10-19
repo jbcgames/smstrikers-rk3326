@@ -873,7 +873,7 @@ void DrawableCharacter::SendToGl(const cCharacter& character) const
         }
     }
 
-    bool skipCharShadow = (Strikers_GetCutsceneShadows() == 0 && nlIsCutsceneState());
+    bool skipCharShadow = (Strikers_GetCutsceneShadows() == 0 && nlIsCutsceneState()) || (Strikers_GetGameplayShadows() == 0);
 
     if (sShadowRenderingDisabled == 0 && !skipCharShadow)
     {
@@ -999,6 +999,12 @@ void DrawableCharacter::Blend(const float* blendFactors, const DrawableCharacter
     mCharacter = lhs.mCharacter;
     mBowser = lhs.mBowser;
     mDirt = lhs.mDirt;
+    mEffectsTexturing = lhs.mEffectsTexturing;
+    if (!mVisible)
+    {
+        return;
+    }
+
     mPosition.x = (1.0f - *blendFactors) * lhs.mPosition.x + *blendFactors * rhs.mPosition.x;
     mPosition.y = (1.0f - *blendFactors) * lhs.mPosition.y + *blendFactors * rhs.mPosition.y;
     mPosition.z = (1.0f - *blendFactors) * lhs.mPosition.z + *blendFactors * rhs.mPosition.z;

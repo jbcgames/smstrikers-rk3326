@@ -2085,7 +2085,7 @@ static constexpr bool kStripTopology = true;
 // Emit a periodic one-line cache/batching summary to confirm the geometry cache is
 // actually hitting on-device (and how effective run-batching is). Perf-tuning scaffolding;
 // off by default in shipped builds.
-static constexpr bool kLogNativeGeomCacheStats = true;
+static constexpr bool kLogNativeGeomCacheStats = false;
 static constexpr u32 kNativeGeomStatsLogInterval = 30; // frames between summaries
 // Per-window counters (reset each log interval).
 static u64 s_geomCacheHits = 0;       // draws served from the persistent cache (no expand/upload)

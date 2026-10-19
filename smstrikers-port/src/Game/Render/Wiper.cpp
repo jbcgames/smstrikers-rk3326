@@ -96,7 +96,9 @@ void Wiper::DoWipe(const char* wipe)
             wipe = "double_ball";
         }
 
+#if defined(DEBUG)
         fprintf(stdout, "[wiper] DoWipe: requested '%s' -> using '%s'\n", origWipe, wipe ? wipe : "(null)");
+#endif
 
         wiperCallback.mTransitionActive = true;
 

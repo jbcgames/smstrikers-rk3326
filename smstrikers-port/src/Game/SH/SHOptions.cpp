@@ -1,4 +1,5 @@
 #include "port/region.h"  // PORT: one binary, three discs
+#include "port/fe_clone.h"
 #include "Game/SH/SHOptions.h"
 #include "Game/FE/FEAudio.h"
 #include "Game/FE/feHelpFuncs.h"
@@ -254,6 +255,7 @@ OptionsScene::~OptionsScene()
     {
         delete m_subMenu;
     }
+    PortFEReleaseClones();
 }
 
 /**

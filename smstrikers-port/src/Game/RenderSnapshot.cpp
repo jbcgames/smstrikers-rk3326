@@ -273,7 +273,10 @@ void RenderSnapshot::Render(float deltaTime) const
 
         for (int i = 0; i < 20; i++)
         {
-            mExplosionFragments[i].Render();
+            if (mExplosionFragments[i].mVisible)
+            {
+                mExplosionFragments[i].Render();
+            }
         }
 
         mBall.Render();

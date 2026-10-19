@@ -39,6 +39,8 @@ void  PortSetFrustumStretch(float stretch);       // [0,1]
 float PortGetCameraBlendOverride(void);           // < 0 means derived
 void  PortSetCameraBlendOverride(float blend);    // < 0 restores derived
 void  PortSetDrawCinematicBars(int draw);
+void  PortSetAspectByName(const char* name);
+const char* PortGetAspectName(void);
 
 #ifdef __cplusplus
 }

@@ -44,31 +44,30 @@ void DrawableExplosionFragment::Grab()
  */
 void DrawableExplosionFragment::Render() const
 {
-    if (g_pGame->mbCaptainShotToScoreOn == 0)
+    if (!mVisible || g_pGame->mbCaptainShotToScoreOn != 0)
     {
-        DrawableObject* obj = WorldManager::s_World->FindDrawableObject(mFragmentModelHash);
-        if (obj != NULL)
+        return;
+    }
+
+    DrawableObject* obj = WorldManager::s_World->FindDrawableObject(mFragmentModelHash);
+    if (obj != NULL)
+    {
+        obj->m_translation = mPosition;
+        obj->m_worldMatrixUpToDate = false;
+        obj->m_orientation = mOrientation;
+        obj->m_worldMatrixUpToDate = false;
+
+        obj->m_translucency = mOpacity;
+        if (obj->m_translucency < 0.0f)
         {
-            obj->m_translation = mPosition;
-            obj->m_worldMatrixUpToDate = false;
-            obj->m_orientation = mOrientation;
-            obj->m_worldMatrixUpToDate = false;
-
-            obj->m_translucency = mOpacity;
-            if (obj->m_translucency < 0.0f)
-            {
-                obj->m_translucency = 0.0f;
-            }
-            if (obj->m_translucency > 1.0f)
-            {
-                obj->m_translucency = 1.0f;
-            }
-
-            if (mVisible)
-            {
-                obj->Draw();
-            }
+            obj->m_translucency = 0.0f;
         }
+        if (obj->m_translucency > 1.0f)
+        {
+            obj->m_translucency = 1.0f;
+        }
+
+        obj->Draw();
     }
 }
 

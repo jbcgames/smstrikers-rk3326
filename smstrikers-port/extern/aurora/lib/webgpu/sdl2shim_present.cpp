@@ -90,6 +90,13 @@ void destroy_sync(void*& sync) {
 // can wait on it). Called on main (shim ctx, reverse fence) and on the worker (render ctx, forward
 // fence).
 void* create_fence() {
+  gl::gl.Flush();
+#if TARGET_PC
+  // On Mali Bifrost (G31/G52), eglCreateSyncKHR / eglClientWaitSyncKHR between shared contexts
+  // blocks inside libmali on an internal mutex while waiting for KMSDRM flips, deadlocking
+  // the driver. With double-buffering and glFlush(), GPU command ordering is already guaranteed.
+  return nullptr;
+#else
   if (gl::gl.eglCreateSyncKHR == nullptr) {
     return nullptr;
   }
@@ -97,8 +104,8 @@ void* create_fence() {
   if (sync == nullptr) {
     return nullptr;
   }
-  gl::gl.Flush();
   return sync;
+#endif
 }
 
 // Main thread, shim context current: allocate the shim-side texture + read FBO and bridge it as an
@@ -255,6 +262,10 @@ void blit_and_swap(Slot& slot) {
   gl::gl.BlitFramebuffer(0, 0, static_cast<gl::GLint>(g_width), static_cast<gl::GLint>(g_height), 0, 0, drawableWidth,
                          drawableHeight, gl::GL_COLOR_BUFFER_BIT, gl::GL_LINEAR);
   gl::gl.BindFramebuffer(gl::GL_READ_FRAMEBUFFER, 0);
+
+#if TARGET_PC
+  gl::gl.Finish();
+#endif
 
   if (g_sdl2SwapWindow != nullptr && g_sdl2Window != nullptr) {
     g_sdl2SwapWindow(g_sdl2Window);
@@ -427,8 +438,13 @@ void publish(uint32_t slot) {
   if (!g_active || slot >= SlotCount) {
     return;
   }
+#if TARGET_PC
+  // Ensure worker rendering is completely finished before handing slot to main thread blit.
+  gl::gl.Finish();
+#else
   // Fence the worker's just-composited frame so the shim context can order its blit behind it.
   g_slots[slot].fwdSync = create_fence();
+#endif
 
   // The main thread consumes the previous frame before enqueueing the work that produces this one,
   // so the mailbox is always empty here. If that invariant ever breaks, drop the stale frame rather

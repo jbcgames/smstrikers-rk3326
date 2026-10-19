@@ -323,7 +323,14 @@ u8 __OSReport_Warning_disable = 0;
 
 void OSReport(const char* msg, ...)
 {
-    if (__OSReport_disable)
+    static int s_report_enabled = -1;
+    if (s_report_enabled < 0)
+    {
+        const char* e = getenv("STRIKERS_REPORT");
+        if (e == NULL) e = getenv("COS_REPORT");
+        s_report_enabled = (e != NULL && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    if (!s_report_enabled || __OSReport_disable)
         return;
     va_list ap;
     va_start(ap, msg);

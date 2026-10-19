@@ -5,6 +5,7 @@
 #include "NL/gl/glDraw3.h"
 #include "NL/gl/glState.h"
 #include "NL/nlString.h"
+#include "port/GraphicsPresets.h"
 
 namespace
 {
@@ -33,6 +34,25 @@ char* GetName(int idx)
 
     return powerupLookup;
 }
+
+static u32 s_powerupHashes[150];
+static bool s_powerupHashesInited = false;
+static inline u32 GetPowerupHash(int idx)
+{
+    if (!s_powerupHashesInited)
+    {
+        for (int i = 0; i < 150; i++)
+        {
+            s_powerupHashes[i] = nlStringLowerHash(GetName(i));
+        }
+        s_powerupHashesInited = true;
+    }
+    if ((unsigned int)idx < 150)
+    {
+        return s_powerupHashes[idx];
+    }
+    return nlStringLowerHash(GetName(idx));
+}
 } // namespace
 
 /**
@@ -40,6 +60,11 @@ char* GetName(int idx)
  */
 static void DrawShadow(float radius, float x, float y, float z)
 {
+    if (Strikers_GetGameplayShadows() == 0)
+    {
+        return;
+    }
+
     float one = 1.0f;
     float zero = 0.0f;
     float half_dim;
@@ -126,7 +151,7 @@ static void DrawShadow(float radius, float x, float y, float z)
  */
 PowerupBase* DrawablePowerup::GetPowerup(int idx) const
 {
-    return FindPowerUp(nlStringLowerHash(GetName(idx)));
+    return FindPowerUp(GetPowerupHash(idx));
 }
 
 /**
@@ -134,7 +159,7 @@ PowerupBase* DrawablePowerup::GetPowerup(int idx) const
  */
 void DrawablePowerup::Grab(int idx)
 {
-    PowerupBase* powerup = FindPowerUp(nlStringLowerHash(GetName(idx)));
+    PowerupBase* powerup = FindPowerUp(GetPowerupHash(idx));
     if (powerup != NULL)
     {
         mType = powerup->m_eType;
@@ -156,10 +181,19 @@ void DrawablePowerup::Grab(int idx)
 void DrawablePowerup::Render(int idx) const
 {
     World* world = WorldManager::s_World;
-    DrawableObject* obj = world->FindDrawableObject(nlStringLowerHash(GetName(idx)));
+    DrawableObject* obj = world->FindDrawableObject(GetPowerupHash(idx));
 
     if (obj == NULL)
     {
+        return;
+    }
+
+    if (!mVisible)
+    {
+        if (obj->m_uObjectFlags & 1)
+        {
+            obj->m_uObjectFlags &= ~1;
+        }
         return;
     }
 
@@ -168,15 +202,7 @@ void DrawablePowerup::Render(int idx) const
     const nlVector3 axis = { 0.0f, 0.0f, 1.0f };
     nlMakeQuat(quat, axis, angle);
 
-    if (mVisible)
-    {
-        obj->m_uObjectFlags |= 1;
-    }
-    else
-    {
-        obj->m_uObjectFlags &= ~1;
-    }
-
+    obj->m_uObjectFlags |= 1;
     obj->m_orientation = quat;
     obj->m_worldMatrixUpToDate = false;
     obj->m_translation = mPosition;
@@ -184,17 +210,15 @@ void DrawablePowerup::Render(int idx) const
     obj->m_scale = mScale;
     obj->m_worldMatrixUpToDate = false;
 
-    if (!mVisible)
-    {
-        return;
-    }
-
     obj->Draw();
     DrawableModel* model = obj->AsDrawableModel();
 
     if (model == NULL)
     {
-        DrawShadow(mRadius, mPosition.x, mPosition.y, mPosition.z);
+        if (Strikers_GetGameplayShadows() != 0)
+        {
+            DrawShadow(mRadius, mPosition.x, mPosition.y, mPosition.z);
+        }
     }
     else
     {

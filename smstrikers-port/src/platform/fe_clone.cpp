@@ -340,6 +340,7 @@ extern "C" void PortFESetPosition(TLInstance* node, float x, float y, float z)
 {
     if (node == nullptr)
         return;
+    node->m_overloadFlags |= 1;
     node->m_overloadedAttributes.v3Position.f.x = x;
     node->m_overloadedAttributes.v3Position.f.y = y;
     node->m_overloadedAttributes.v3Position.f.z = z;

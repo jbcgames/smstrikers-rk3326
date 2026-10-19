@@ -26,6 +26,90 @@ cd "$GAMEDIR" || exit 1
 
 > "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
 
+# Sourcing custom graphics options early (to detect aspect ratio and resolution preferences)
+if [ -f "$GAMEDIR/graphics_options.env" ]; then
+  echo "[port] Sourcing custom graphics options from $GAMEDIR/graphics_options.env"
+  source "$GAMEDIR/graphics_options.env"
+fi
+
+export STRIKERS_ASPECT="${STRIKERS_ASPECT:-auto}"
+export STRIKERS_RES_SCALE="${STRIKERS_RES_SCALE:-0.85}"
+export STRIKERS_ENABLE_REPLAYS="${STRIKERS_ENABLE_REPLAYS:-1}"
+
+# =============================================================================
+# SPLASH / LOADING SCREEN (Resolution-matched, centered with edge replication)
+# =============================================================================
+SPLASH_PID=""
+cleanup() {
+  [ -n "$SPLASH_PID" ] && kill -9 "$SPLASH_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# 1. Detect Screen Resolution (Width x Height)
+CUR_RES=""
+if [ -x "$controlfolder/sdl_resolution.$DEVICE_ARCH" ]; then
+  CUR_RES=$("$controlfolder/sdl_resolution.$DEVICE_ARCH" 2>/dev/null | grep -a 'Current' | awk -F ': ' '{print $2}')
+fi
+if [ -z "$CUR_RES" ] && [ -n "$DISPLAY_WIDTH" ] && [ -n "$DISPLAY_HEIGHT" ]; then
+  CUR_RES="${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}"
+fi
+if [ -z "$CUR_RES" ] && [ -f "/sys/class/graphics/fb0/virtual_size" ]; then
+  CUR_RES=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | tr ',' 'x')
+fi
+[ -z "$CUR_RES" ] && CUR_RES="640x480"
+
+# 2. Select matching splash image with edge replication
+SPLASH_IMG=""
+if [ -f "$GAMEDIR/Logo_${CUR_RES}.jpg" ]; then
+  SPLASH_IMG="$GAMEDIR/Logo_${CUR_RES}.jpg"
+fi
+
+if [ -z "$SPLASH_IMG" ]; then
+  case "$STRIKERS_ASPECT" in
+    16:9) [ -f "$GAMEDIR/Logo_16x9.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_16x9.jpg" ;;
+    1:1)  [ -f "$GAMEDIR/Logo_1x1.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_1x1.jpg" ;;
+    3:2)  [ -f "$GAMEDIR/Logo_3x2.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_3x2.jpg" ;;
+    4:3)  [ -f "$GAMEDIR/Logo_4x3.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_4x3.jpg" ;;
+  esac
+fi
+
+if [ -z "$SPLASH_IMG" ] && [ -n "$CUR_RES" ]; then
+  RES_W=$(echo "$CUR_RES" | cut -d'x' -f 1)
+  RES_H=$(echo "$CUR_RES" | cut -d'x' -f 2)
+  if [ -n "$RES_W" ] && [ -n "$RES_H" ] && [ "$RES_H" -gt 0 ]; then
+    RATIO=$(( (RES_W * 100) / RES_H ))
+    if [ "$RATIO" -ge 165 ]; then
+      [ -f "$GAMEDIR/Logo_16x9.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_16x9.jpg"
+    elif [ "$RATIO" -ge 140 ] && [ "$RATIO" -le 160 ]; then
+      [ -f "$GAMEDIR/Logo_3x2.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_3x2.jpg"
+    elif [ "$RATIO" -ge 120 ] && [ "$RATIO" -le 139 ]; then
+      [ -f "$GAMEDIR/Logo_4x3.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_4x3.jpg"
+    elif [ "$RATIO" -le 110 ]; then
+      [ -f "$GAMEDIR/Logo_1x1.jpg" ] && SPLASH_IMG="$GAMEDIR/Logo_1x1.jpg"
+    fi
+  fi
+fi
+
+if [ -z "$SPLASH_IMG" ] || [ ! -f "$SPLASH_IMG" ]; then
+  if [ -f "$GAMEDIR/Logo_640x480.jpg" ]; then
+    SPLASH_IMG="$GAMEDIR/Logo_640x480.jpg"
+  else
+    SPLASH_IMG="$GAMEDIR/Logo.jpg"
+  fi
+fi
+
+if [ -f "$SPLASH_IMG" ]; then
+  if [ -x "$controlfolder/sdl2imgshow.$DEVICE_ARCH" ]; then
+    echo "[port] Showing loading splash $SPLASH_IMG for $CUR_RES ($controlfolder/sdl2imgshow.$DEVICE_ARCH)"
+    "$controlfolder/sdl2imgshow.$DEVICE_ARCH" -i "$SPLASH_IMG" -S fit -c "000000" -b strikers &
+    SPLASH_PID=$!
+  elif [ -x "$controlfolder/sdl2imgshow" ]; then
+    echo "[port] Showing loading splash $SPLASH_IMG for $CUR_RES ($controlfolder/sdl2imgshow)"
+    "$controlfolder/sdl2imgshow" -i "$SPLASH_IMG" -S fit -c "000000" -b strikers &
+    SPLASH_PID=$!
+  fi
+fi
+
 # =============================================================================
 # HARDWARE AUDIO SETUP (Preserve EmulationStation volume)
 # =============================================================================
@@ -77,11 +161,6 @@ export SDL3SHIM_SDL2_AUDIODRIVER="alsa"
 # =============================================================================
 # STRIKERS PERFORMANCE PROFILE FOR RK3326 / LOW-SPEC GLES
 # =============================================================================
-if [ -f "$GAMEDIR/graphics_options.env" ]; then
-  echo "[port] Sourcing custom graphics options from $GAMEDIR/graphics_options.env"
-  source "$GAMEDIR/graphics_options.env"
-fi
-
 export STRIKERS_ENABLE_DOF="${STRIKERS_ENABLE_DOF:-0}"
 export STRIKERS_CULL_EXTRA_MODELS="${STRIKERS_CULL_EXTRA_MODELS:-1}"
 export STRIKERS_MAX_PARTICLES="${STRIKERS_MAX_PARTICLES:-512}"
@@ -90,6 +169,7 @@ export STRIKERS_FENCE_RATE="${STRIKERS_FENCE_RATE:-0.06}"
 # Cutscene/NIS optimizations (0 = disabled in cutscenes for max performance, 1 = enabled)
 export STRIKERS_CUTSCENE_CROWD="${STRIKERS_CUTSCENE_CROWD:-0}"
 export STRIKERS_CUTSCENE_SHADOWS="${STRIKERS_CUTSCENE_SHADOWS:-0}"
+export STRIKERS_GAMEPLAY_SHADOWS="${STRIKERS_GAMEPLAY_SHADOWS:-1}"
 export STRIKERS_CUTSCENE_EFFECTS="${STRIKERS_CUTSCENE_EFFECTS:-0}"
 export STRIKERS_CUTSCENE_CULL_EXTRA="${STRIKERS_CUTSCENE_CULL_EXTRA:-1}"
 export STRIKERS_CUTSCENE_MAX_DIST="${STRIKERS_CUTSCENE_MAX_DIST:-85.0}"
@@ -100,6 +180,7 @@ export STRIKERS_FAST_TRANSITIONS="${STRIKERS_FAST_TRANSITIONS:-1}"
 export STRIKERS_TRANSITION_SPEED="${STRIKERS_TRANSITION_SPEED:-1.0}"
 export STRIKERS_DISABLE_SCREENGRAB="${STRIKERS_DISABLE_SCREENGRAB:-1}"
 export STRIKERS_DISABLE_TRANSITION_OUTLINE="${STRIKERS_DISABLE_TRANSITION_OUTLINE:-1}"
+export STRIKERS_SKIP_INTRO="${STRIKERS_SKIP_INTRO:-1}"
 
 # =============================================================================
 # HARDWARE PERFORMANCE GOVERNORS & MEMORY TUNING
@@ -235,4 +316,5 @@ while true; do
   break
 done
 
+cleanup
 pm_finish

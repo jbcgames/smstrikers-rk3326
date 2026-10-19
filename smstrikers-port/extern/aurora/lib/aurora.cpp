@@ -317,12 +317,19 @@ void end_frame() noexcept {
   static int s_aurora_prof = 0;
   if (++s_aurora_prof >= 30) {
     s_aurora_prof = 0;
-    const double d_drain = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    const double d_finish = std::chrono::duration<double, std::milli>(t2 - t1).count();
-    const double d_end = std::chrono::duration<double, std::milli>(t3 - t2).count();
-    std::fprintf(stdout, "[AURORA-SUB] drain: %.1fms | finish: %.1fms | gfx_end(worker+swap): %.1fms\n",
-                 d_drain, d_finish, d_end);
-    std::fflush(stdout);
+    static int s_debug_perf = -1;
+    if (s_debug_perf < 0) {
+      const char* v = std::getenv("STRIKERS_DEBUG_PERF");
+      s_debug_perf = (v && std::strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    if (s_debug_perf) {
+      const double d_drain = std::chrono::duration<double, std::milli>(t1 - t0).count();
+      const double d_finish = std::chrono::duration<double, std::milli>(t2 - t1).count();
+      const double d_end = std::chrono::duration<double, std::milli>(t3 - t2).count();
+      std::fprintf(stdout, "[AURORA-SUB] drain: %.1fms | finish: %.1fms | gfx_end(worker+swap): %.1fms\n",
+                   d_drain, d_finish, d_end);
+      std::fflush(stdout);
+    }
   }
 
 #endif

@@ -79,6 +79,10 @@ public:
                                 child->SetAssetColour(colour);
                             }
                         }
+                        else if (child->m_type == TLAT_COMPONENT)
+                        {
+                            ColourAllText(*(TLComponentInstance*)child, colour);
+                        }
                         child = child->m_next;
                     } while (child != firstChild);
                 }
@@ -158,16 +162,25 @@ public:
     virtual bool ChangesMade()
     {
         u32 checksum = nlChecksum32(&mSettings, sizeof(VisualSettings));
-        return (mSettingsCRC != checksum) || (mBackupGraphicsPreset != mCurrentGraphicsPreset);
+        return (mSettingsCRC != checksum) ||
+               (mBackupGraphicsPreset != mCurrentGraphicsPreset) ||
+               (mBackupResolutionPreset != mCurrentResolutionPreset) ||
+               (mBackupReplaysEnabled != mCurrentReplaysEnabled);
     }
 
     void BuildGraphicsPresetMenu(TLComponentInstance* compinstance, int startindex);
+    void BuildResolutionPresetMenu(TLComponentInstance* compinstance, int startindex);
+    void BuildReplayMenu(TLComponentInstance* compinstance, int startindex);
 
     /* 0x26C */ VisualSettings& mSettings;
     /* 0x270 */ VisualSettings mBackupSettings;
     int mBackupGraphicsPreset;
     int mCurrentGraphicsPreset;
-}; // total size: 0x27C
+    int mBackupResolutionPreset;
+    int mCurrentResolutionPreset;
+    int mBackupReplaysEnabled;
+    int mCurrentReplaysEnabled;
+}; // total size: 0x28C
 
 class OptionsAudioMenuV2 : public OptionsSubMenu
 {

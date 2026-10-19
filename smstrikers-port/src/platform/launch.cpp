@@ -37,6 +37,17 @@ const char* LevelName(AuroraLogLevel level)
 
 void AuroraLog(AuroraLogLevel level, const char* module, const char* message, unsigned int len)
 {
+    if (level < LOG_WARNING)
+    {
+        static int s_verbose = -1;
+        if (s_verbose < 0)
+        {
+            const char* e = getenv("STRIKERS_VERBOSE");
+            s_verbose = (e != NULL && strcmp(e, "1") == 0) ? 1 : 0;
+        }
+        if (!s_verbose)
+            return;
+    }
     fprintf(stderr, "[%s] [%s] %.*s\n", LevelName(level), module != NULL ? module : "", (int)len, message);
     if (level != LOG_FATAL)
         return;
@@ -171,6 +182,7 @@ extern "C" void PortAuroraConfigure(AuroraConfig* cfg)
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_TYPE_STRING, "game");
 
     cfg->logCallback = AuroraLog;
+    cfg->logLevel = LOG_WARNING;
 
 #if defined(__linux__)
     // Dawn's EGL swap chain cannot present to a Wayland surface, so the GL backends go through XWayland.
@@ -449,6 +461,8 @@ unsigned g_rowsGot;
 void ApplyRenderRows()
 {
     if (g_renderScale <= 0.0f)
+        return;
+    if (!SDL_WasInit(SDL_INIT_VIDEO))
         return;
     const unsigned want = (unsigned)(g_renderScale * 448.0f + 0.5f);
     // A window, aspect or VI mode change all show up as the framebuffer height moving.

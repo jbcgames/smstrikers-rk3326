@@ -73,7 +73,11 @@ float glGetOrthographicHeight()
 float glGetOrthographicWidth()
 {
     // PORT: 480 * the display aspect, which is 640 at 4:3 exactly as shipped.
-    return (float)PortLogicalFrameWidth();
+    // Never allow less than 640 so the 2D UI canvas is never clipped.
+    float w = (float)PortLogicalFrameWidth();
+    if (w < 640.0f)
+        w = 640.0f;
+    return w;
 }
 
 /**

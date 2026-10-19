@@ -706,6 +706,7 @@ int main(int argc, char* argv[])
     }
 
     Strikers_InitGraphicsPreset();
+    Strikers_InitResolutionPreset();
     Strikers_InitControlPreset();
 
 #if defined(PORT_USE_AURORA)

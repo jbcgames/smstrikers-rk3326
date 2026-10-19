@@ -408,53 +408,51 @@ void Replay::Play(float time, T& previous, T& current, float* blend) const
     int interval;
     Frame* rhs;
     Frame* lhs;
-    Frame* tryLhs;
     LoadFrame previousLoadFrame;
     LoadFrame currentLoadFrame;
 
     for (interval = 1; interval <= 3; interval++)
     {
-        rhs = mReels[mReelIdx].mBegin;
-        while (rhs != NULL)
+        lhs = NULL;
+        rhs = NULL;
+        Frame* curr = mReels[mReelIdx].mBegin;
+        while (curr != NULL)
         {
-            if (rhs->mInterval == interval && rhs->mTime > time)
+            if (curr->mInterval == interval)
             {
-                lhs = NULL;
-                tryLhs = mReels[mReelIdx].mBegin;
-                while (tryLhs != NULL)
+                if (curr->mTime <= time)
                 {
-                    if (tryLhs->mInterval == interval && tryLhs->mTime <= time)
-                    {
-                        lhs = tryLhs;
-                    }
-                    tryLhs = Next(tryLhs, mReelIdx);
+                    lhs = curr;
                 }
-
-                if (lhs != NULL && rhs != NULL)
+                else
                 {
-                    blend[interval - 1] = (time - lhs->mTime) / (rhs->mTime - lhs->mTime);
-
-                    float aheadOfFrame = time - lhs->mTime;
-                    char* lhsBegin = lhs->mBegin;
-                    previousLoadFrame.mInterval = interval;
-                    previousLoadFrame.mStream.mCount = 0;
-                    previousLoadFrame.mStream.mStorage = lhsBegin;
-                    previousLoadFrame.mReplayNonBlendables = REPLAY_NON_BLENDABLES;
-                    previousLoadFrame.mNonBlendableAheadOfFrame = aheadOfFrame;
-                    Replayable<0>(previousLoadFrame, previous);
-
-                    char* rhsBegin = rhs->mBegin;
-                    currentLoadFrame.mInterval = interval;
-                    currentLoadFrame.mStream.mCount = 0;
-                    currentLoadFrame.mStream.mStorage = rhsBegin;
-                    currentLoadFrame.mReplayNonBlendables = DO_NOT_REPLAY_NON_BLENDABLES;
-                    currentLoadFrame.mNonBlendableAheadOfFrame = 0.0f;
-                    Replayable<0>(currentLoadFrame, current);
-
+                    rhs = curr;
                     break;
                 }
             }
-            rhs = Next(rhs, mReelIdx);
+            curr = Next(curr, mReelIdx);
+        }
+
+        if (lhs != NULL && rhs != NULL)
+        {
+            blend[interval - 1] = (time - lhs->mTime) / (rhs->mTime - lhs->mTime);
+
+            float aheadOfFrame = time - lhs->mTime;
+            char* lhsBegin = lhs->mBegin;
+            previousLoadFrame.mInterval = interval;
+            previousLoadFrame.mStream.mCount = 0;
+            previousLoadFrame.mStream.mStorage = lhsBegin;
+            previousLoadFrame.mReplayNonBlendables = REPLAY_NON_BLENDABLES;
+            previousLoadFrame.mNonBlendableAheadOfFrame = aheadOfFrame;
+            Replayable<0>(previousLoadFrame, previous);
+
+            char* rhsBegin = rhs->mBegin;
+            currentLoadFrame.mInterval = interval;
+            currentLoadFrame.mStream.mCount = 0;
+            currentLoadFrame.mStream.mStorage = rhsBegin;
+            currentLoadFrame.mReplayNonBlendables = DO_NOT_REPLAY_NON_BLENDABLES;
+            currentLoadFrame.mNonBlendableAheadOfFrame = 0.0f;
+            Replayable<0>(currentLoadFrame, current);
         }
     }
 }

@@ -10,6 +10,8 @@ smstrikers-port/data/
 *.ciso
 *.CISO
 *.elf
+*.zip
+
 
 smstrikers-port/extern/ffmpeg-windows-x86_64/
 smstrikers-port/extern/ffmpeg-static/
@@ -40,5 +42,7 @@ test_ssh.sh
 __pycache__/
 
 .vscode/
+.idea/
 
 *.log
+

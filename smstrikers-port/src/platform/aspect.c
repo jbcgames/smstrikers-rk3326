@@ -111,8 +111,7 @@ float PortTargetAspect(void)
     s_aspect = 16.0f / 9.0f;
 
     env = getenv("STRIKERS_ASPECT");
-    if (env == NULL || *env == '\0' || strcmp(env, "auto") == 0
-        || strcmp(env, "AUTO") == 0)
+    if (env == NULL || *env == '\0' || strcasecmp(env, "auto") == 0)
     {
         // 16:9 if main() reported nothing, which is also the default window.
         s_follows = 1;
@@ -149,9 +148,7 @@ float PortTargetAspect(void)
 
 unsigned int PortLogicalFrameWidth(void)
 {
-    // 480 * aspect. PORT_CONSOLE_ASPECT is not in the arithmetic because it cancels: the design box
-    // is 640x480 shown as 4:3, and 640 = 480 * 4/3, so the width that reproduces the console is
-    // exactly what this yields at 4:3.
+    // 480 * aspect. At 1:1 this yields 480 (a square frame).
     float w = PORT_DESIGN_HEIGHT * PortTargetAspect();
     unsigned int u = (unsigned int)(w + 0.5f);
 
@@ -237,10 +234,17 @@ void PortPerspective(float consoleFov, float consoleRatio,
                                      * (PORT_CONSOLE_ASPECT / consoleRatio - 1.0f);
     const float ratio = PortTargetAspect() / stretch;
 
-    // Hold the vertical field of view: glplatMatrixPerspective's fov is the horizontal one, so it
-    // has to move with the ratio to leave m11 alone. tan() rather than the angle, because the angle
-    // is not what scales.
-    const float scale = ratio / consoleRatio;
+    // For aspect ratios narrower than 4:3 (such as 1:1), hold the horizontal FOV (Vert+)
+    // so that the 3D scene (pitch, stadium, characters) is never cropped on the sides.
+    float scale;
+    if (ratio < consoleRatio)
+    {
+        scale = 1.0f / stretch;
+    }
+    else
+    {
+        scale = ratio / consoleRatio;
+    }
 
     const float fov = 2.0f * atanf(tanf(0.5f * consoleFov) * scale);
 
@@ -309,4 +313,48 @@ int PortDrawCinematicBars(void)
 void PortSetDrawCinematicBars(int draw)
 {
     s_bars = draw ? 1 : 0;
+}
+
+void PortSetAspectByName(const char* name)
+{
+    float a = 0.0f;
+    s_resolved = 1;
+    if (name == NULL || *name == '\0' || strcasecmp(name, "auto") == 0)
+    {
+        s_follows = 1;
+        if (s_windowAspect > 0.0f)
+            a = ClampAspect(s_windowAspect);
+        else
+            a = 16.0f / 9.0f;
+    }
+    else
+    {
+        s_follows = 0;
+        a = ParseAspect(name);
+        if (a <= 0.0f)
+            a = 16.0f / 9.0f;
+        a = ClampAspect(a);
+    }
+
+    if (a != s_aspect)
+    {
+        s_aspect = a;
+        s_generation++;
+        PortApplyAspectChange();
+    }
+}
+
+const char* PortGetAspectName(void)
+{
+    if (s_follows)
+        return "auto";
+    if (fabsf(s_aspect - (4.0f / 3.0f)) < 0.02f)
+        return "4:3";
+    if (fabsf(s_aspect - (16.0f / 9.0f)) < 0.02f)
+        return "16:9";
+    if (fabsf(s_aspect - 1.0f) < 0.02f)
+        return "1:1";
+    if (fabsf(s_aspect - 1.5f) < 0.02f)
+        return "3:2";
+    return "auto";
 }

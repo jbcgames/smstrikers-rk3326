@@ -1,5 +1,7 @@
 #include "Game/SH/SHCrossFader.h"
 #include "port/benchmark.h"
+#include <cstdlib>
+#include <cstring>
 
 #include "NL/nlColour.h"
 #include "NL/nlConfig.h"
@@ -48,6 +50,17 @@ CrossFaderScene::~CrossFaderScene()
 /**
  * Offset/Address/Size: 0x510 | 0x800BC414 | size: 0x3A8
  */
+static bool ShouldSkipIntro()
+{
+    static int s_skip = -1;
+    if (s_skip < 0)
+    {
+        const char* e = getenv("STRIKERS_SKIP_INTRO");
+        s_skip = (e != NULL && (strcmp(e, "1") == 0 || strcmp(e, "true") == 0)) ? 1 : 0;
+    }
+    return s_skip != 0;
+}
+
 void CrossFaderScene::SceneCreated()
 {
     typedef TLImageInstance* (*FindImageByValue)(FEPresentation*, InlineHasher, InlineHasher, InlineHasher, InlineHasher, InlineHasher, InlineHasher);
@@ -55,7 +68,11 @@ void CrossFaderScene::SceneCreated()
 
     FEPresentation* pPresentation;
     bool doCrossFade = true;
-    if (Config::Global().Exists("showlegal"))
+    if (ShouldSkipIntro())
+    {
+        doCrossFade = false;
+    }
+    else if (Config::Global().Exists("showlegal"))
     {
         doCrossFade = GetConfigBool(Config::Global(), "showlegal", false);
     }
@@ -70,7 +87,8 @@ void CrossFaderScene::SceneCreated()
             nlSingleton<FEResourceManager>::Instance()->Run(0.0f);
         }
         nlSingleton<GameSceneManager>::Instance()->PopEntireStack();
-        nlSingleton<GameSceneManager>::Instance()->Push(SCENE_INTRO_MOVIE, SCREEN_NOTHING, false);
+        SceneList nextScene = ShouldSkipIntro() ? SCENE_TITLE : SCENE_INTRO_MOVIE;
+        nlSingleton<GameSceneManager>::Instance()->Push(nextScene, SCREEN_NOTHING, false);
     }
     else
     {
@@ -374,7 +392,8 @@ void CrossFaderScene::Update(float fDeltaT)
             if (timer >= 0.2f)
             {
                 nlSingleton<GameSceneManager>::Instance()->PopEntireStack();
-                nlSingleton<GameSceneManager>::Instance()->Push(SCENE_INTRO_MOVIE, SCREEN_NOTHING, false);
+                SceneList nextScene = ShouldSkipIntro() ? SCENE_TITLE : SCENE_INTRO_MOVIE;
+                nlSingleton<GameSceneManager>::Instance()->Push(nextScene, SCREEN_NOTHING, false);
                 mFadeToBlackTimer = 0.0f;
             }
         }

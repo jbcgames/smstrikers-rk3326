@@ -17,6 +17,10 @@ set(CMAKE_C_COMPILER_TARGET   aarch64-linux-gnu)
 set(CMAKE_CXX_COMPILER_TARGET aarch64-linux-gnu)
 set(CMAKE_ASM_COMPILER_TARGET aarch64-linux-gnu)
 
+# Compiler flags for RK3326 Cortex-A35 microarchitecture (-O3, NEON, in-order pipelining)
+set(CMAKE_C_FLAGS_INIT   "-mcpu=cortex-a35 -O3 -DNDEBUG -fsigned-char")
+set(CMAKE_CXX_FLAGS_INIT "-mcpu=cortex-a35 -O3 -DNDEBUG -fsigned-char")
+
 # Use the GNU cross-linker (aarch64-linux-gnu-ld)
 set(CMAKE_EXE_LINKER_FLAGS_INIT    "-fuse-ld=/usr/bin/aarch64-linux-gnu-ld")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "-fuse-ld=/usr/bin/aarch64-linux-gnu-ld")

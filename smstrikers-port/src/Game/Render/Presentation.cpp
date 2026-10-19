@@ -1,5 +1,6 @@
 #include "Game/Render/Presentation.h"
 #include "port/aspect.h"
+#include "port/GraphicsPresets.h"
 #include "Game/BeginFrameTask.h"
 #include "Game/FixedUpdateTask.h"\n#include <stdlib.h>
 #include "Game/ParticleUpdateTask.h"
@@ -529,6 +530,10 @@ void Presentation::WaitForAutoReplayCompletion(const char* wipe)
     if (nlSingleton<ScreenTransitionManager>::Instance()->m_SelectedTransition == NULL)
     {
         nlSingleton<ScreenTransitionManager>::Instance()->SelectRandomTransition(wipe);
+    }
+    if (Strikers_GetReplaysEnabled() == 0)
+    {
+        return;
     }
     if (!ReplayChoreo::Instance().Done())
     {
@@ -1110,6 +1115,10 @@ void Presentation::PlayAutoReplay(ReplayType type)
     {
         return;
     }
+    if (Strikers_GetReplaysEnabled() == 0)
+    {
+        return;
+    }
     if (nlTaskManager::m_pInstance->m_CurrState != 0x10 && !IsDuringGamePauseState())
     {
         nlTaskManager::SetNextState(0x10);
@@ -1228,7 +1237,7 @@ void Presentation::StopOverlay()
 void Presentation::PlayHighlights()
 {
     nlSingleton<ScreenTransitionManager>::Instance()->m_SelectedTransition = NULL;
-    if (ReplayChoreo::Instance().NumHighlights() <= 0)
+    if (Strikers_GetReplaysEnabled() == 0 || ReplayChoreo::Instance().NumHighlights() <= 0)
     {
         return;
     }

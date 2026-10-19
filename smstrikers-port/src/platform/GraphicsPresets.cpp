@@ -1,13 +1,22 @@
 #include "port/GraphicsPresets.h"
+#include "port/aspect.h"
+#include "port/launch.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "Game/Drawable/DrawableCharacter.h"
+
+extern bool g_bDrawPlanarShadows;
 
 static int s_currentPreset = GPRESET_MEDIUM;
+static int s_currentResolution = RESO_AUTO;
+static float s_currentResScale = 0.85f;
 
 static int s_optCutsceneSkin = 0;       // 0 = rigid, 1 = blend
 static int s_optCutsceneCrowd = 0;      // 0 = hide, 1 = show
 static int s_optCutsceneShadows = 0;    // 0 = hide, 1 = show
+static int s_optGameplayShadows = 1;    // 0 = hide, 1 = show (disabled in Alto)
+static int s_optReplaysEnabled = 1;     // 1 = enabled (default), 0 = disabled
 static int s_optCutsceneEffects = 0;    // 0 = hide, 1 = show
 static int s_optCutsceneExtra = 1;      // 1 = cull extra props, 0 = keep
 static float s_optCutsceneMaxDist = 85.0f;
@@ -23,6 +32,14 @@ static const char* s_presetNames[4] = {
     "Bajo",
     "Medio",
     "Alto"
+};
+
+static const char* s_resolutionNames[5] = {
+    "auto",
+    "4:3",
+    "16:9",
+    "1:1",
+    "3:2"
 };
 
 static const char* GetEnvFilePath()
@@ -54,9 +71,13 @@ static void SavePresetToFile(int presetIdx)
     {
         fprintf(f, "# Super Mario Strikers - Configuración de Rendimiento y Gráficos\n");
         fprintf(f, "export STRIKERS_PRESET=\"%s\"\n", s_presetNames[presetIdx]);
+        fprintf(f, "export STRIKERS_ASPECT=\"%s\"\n", s_resolutionNames[s_currentResolution]);
+        fprintf(f, "export STRIKERS_RES_SCALE=\"%.2f\"\n", s_currentResScale);
         fprintf(f, "export STRIKERS_CUTSCENE_SKIN=\"%s\"\n", (s_optCutsceneSkin == 1 ? "blend" : "rigid"));
         fprintf(f, "export STRIKERS_CUTSCENE_CROWD=\"%d\"\n", s_optCutsceneCrowd);
         fprintf(f, "export STRIKERS_CUTSCENE_SHADOWS=\"%d\"\n", s_optCutsceneShadows);
+        fprintf(f, "export STRIKERS_GAMEPLAY_SHADOWS=\"%d\"\n", s_optGameplayShadows);
+        fprintf(f, "export STRIKERS_ENABLE_REPLAYS=\"%d\"\n", s_optReplaysEnabled);
         fprintf(f, "export STRIKERS_CUTSCENE_EFFECTS=\"%d\"\n", s_optCutsceneEffects);
         fprintf(f, "export STRIKERS_CUTSCENE_CULL_EXTRA=\"%d\"\n", s_optCutsceneExtra);
         fprintf(f, "export STRIKERS_CUTSCENE_MAX_DIST=\"%.1f\"\n", s_optCutsceneMaxDist);
@@ -82,9 +103,11 @@ void Strikers_ApplyGraphicsPreset(int presetIdx, bool saveToFile)
     switch (presetIdx)
     {
     case GPRESET_NONE: // 0: Ninguna (Original GameCube)
+        s_currentResScale = 1.0f;
         s_optCutsceneSkin = 1; // blend
         s_optCutsceneCrowd = 1;
         s_optCutsceneShadows = 1;
+        s_optGameplayShadows = 1;
         s_optCutsceneEffects = 1;
         s_optCutsceneExtra = 0;
         s_optCutsceneMaxDist = 200.0f;
@@ -97,9 +120,11 @@ void Strikers_ApplyGraphicsPreset(int presetIdx, bool saveToFile)
         break;
 
     case GPRESET_LOW: // 1: Bajo
+        s_currentResScale = 0.90f;
         s_optCutsceneSkin = 0; // rigid
         s_optCutsceneCrowd = 1;
         s_optCutsceneShadows = 1;
+        s_optGameplayShadows = 1;
         s_optCutsceneEffects = 1;
         s_optCutsceneExtra = 1;
         s_optCutsceneMaxDist = 120.0f;
@@ -113,9 +138,11 @@ void Strikers_ApplyGraphicsPreset(int presetIdx, bool saveToFile)
 
     case GPRESET_MEDIUM: // 2: Medio (Recomendado)
     default:
+        s_currentResScale = 0.85f;
         s_optCutsceneSkin = 0; // rigid
         s_optCutsceneCrowd = 0;
         s_optCutsceneShadows = 0;
+        s_optGameplayShadows = 1;
         s_optCutsceneEffects = 0;
         s_optCutsceneExtra = 1;
         s_optCutsceneMaxDist = 85.0f;
@@ -128,9 +155,11 @@ void Strikers_ApplyGraphicsPreset(int presetIdx, bool saveToFile)
         break;
 
     case GPRESET_HIGH: // 3: Alto
+        s_currentResScale = 0.75f;
         s_optCutsceneSkin = 0; // rigid
         s_optCutsceneCrowd = 0;
         s_optCutsceneShadows = 0;
+        s_optGameplayShadows = 0; // Sombras generales eliminadas
         s_optCutsceneEffects = 0;
         s_optCutsceneExtra = 1;
         s_optCutsceneMaxDist = 60.0f;
@@ -143,6 +172,11 @@ void Strikers_ApplyGraphicsPreset(int presetIdx, bool saveToFile)
         break;
     }
 
+    g_bDrawPlanarShadows = (s_optGameplayShadows != 0);
+    DrawableCharacter::sShadowRenderingDisabled = (s_optGameplayShadows == 0);
+
+    PortSetRenderScale(s_currentResScale);
+
     if (saveToFile)
     {
         SavePresetToFile(presetIdx);
@@ -153,6 +187,9 @@ void Strikers_InitGraphicsPreset()
 {
     // Try to load preset name from graphics_options.env
     int preset = GPRESET_MEDIUM;
+    float scale = -1.0f;
+    int gameShadows = -1;
+    int replaysEnabled = -1;
     const char* filepath = GetEnvFilePath();
     FILE* f = fopen(filepath, "r");
     if (!f)
@@ -170,7 +207,25 @@ void Strikers_InitGraphicsPreset()
                 else if (strstr(line, "Bajo")) preset = GPRESET_LOW;
                 else if (strstr(line, "Medio")) preset = GPRESET_MEDIUM;
                 else if (strstr(line, "Alto")) preset = GPRESET_HIGH;
-                break;
+            }
+            if (strstr(line, "STRIKERS_RES_SCALE="))
+            {
+                char* eq = strchr(line, '=');
+                if (eq)
+                {
+                    float sc = (float)atof(eq + 1);
+                    if (sc >= 0.5f && sc <= 2.0f) scale = sc;
+                }
+            }
+            if (strstr(line, "STRIKERS_GAMEPLAY_SHADOWS="))
+            {
+                char* eq = strchr(line, '=');
+                if (eq) gameShadows = atoi(eq + 1);
+            }
+            if (strstr(line, "STRIKERS_ENABLE_REPLAYS="))
+            {
+                char* eq = strchr(line, '=');
+                if (eq) replaysEnabled = atoi(eq + 1);
             }
         }
         fclose(f);
@@ -185,15 +240,128 @@ void Strikers_InitGraphicsPreset()
             else if (strcmp(envPreset, "Medio") == 0) preset = GPRESET_MEDIUM;
             else if (strcmp(envPreset, "Alto") == 0) preset = GPRESET_HIGH;
         }
+        const char* envScale = getenv("STRIKERS_RES_SCALE");
+        if (envScale)
+        {
+            float sc = (float)atof(envScale);
+            if (sc >= 0.5f && sc <= 2.0f) scale = sc;
+        }
+        const char* envGameShadows = getenv("STRIKERS_GAMEPLAY_SHADOWS");
+        if (envGameShadows) gameShadows = atoi(envGameShadows);
+        const char* envReplays = getenv("STRIKERS_ENABLE_REPLAYS");
+        if (envReplays) replaysEnabled = atoi(envReplays);
     }
 
     Strikers_ApplyGraphicsPreset(preset, false);
+    if (replaysEnabled >= 0)
+    {
+        s_optReplaysEnabled = (replaysEnabled != 0 ? 1 : 0);
+    }
+    if (gameShadows >= 0)
+    {
+        s_optGameplayShadows = gameShadows;
+        g_bDrawPlanarShadows = (s_optGameplayShadows != 0);
+        DrawableCharacter::sShadowRenderingDisabled = (s_optGameplayShadows == 0);
+    }
+    if (scale > 0.0f)
+    {
+        s_currentResScale = scale;
+        PortSetRenderScale(s_currentResScale);
+    }
 }
 
 int Strikers_GetCurrentGraphicsPreset()
 {
     return s_currentPreset;
 }
+
+void Strikers_ApplyResolutionPreset(int resIdx, bool saveToFile)
+{
+    if (resIdx < 0) resIdx = 0;
+    if (resIdx > 4) resIdx = 4;
+    s_currentResolution = resIdx;
+
+    PortSetAspectByName(s_resolutionNames[resIdx]);
+
+    if (saveToFile)
+    {
+        SavePresetToFile(s_currentPreset);
+    }
+}
+
+int Strikers_GetCurrentResolutionPreset()
+{
+    return s_currentResolution;
+}
+
+const char* Strikers_GetResolutionPresetString(int resIdx)
+{
+    if (resIdx < 0 || resIdx > 4) resIdx = 0;
+    return s_resolutionNames[resIdx];
+}
+
+void Strikers_InitResolutionPreset()
+{
+    int res = RESO_AUTO;
+    float scale = s_currentResScale;
+    const char* filepath = GetEnvFilePath();
+    FILE* f = fopen(filepath, "r");
+    if (!f)
+    {
+        f = fopen("graphics_options.env", "r");
+    }
+    if (f)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), f))
+        {
+            if (strstr(line, "STRIKERS_ASPECT="))
+            {
+                if (strstr(line, "4:3")) res = RESO_4_3;
+                else if (strstr(line, "16:9")) res = RESO_16_9;
+                else if (strstr(line, "1:1")) res = RESO_1_1;
+                else if (strstr(line, "3:2")) res = RESO_3_2;
+                else if (strstr(line, "auto")) res = RESO_AUTO;
+            }
+            if (strstr(line, "STRIKERS_RES_SCALE="))
+            {
+                char* eq = strchr(line, '=');
+                if (eq)
+                {
+                    float sc = (float)atof(eq + 1);
+                    if (sc >= 0.5f && sc <= 2.0f) scale = sc;
+                }
+            }
+        }
+        fclose(f);
+    }
+    else
+    {
+        const char* envAspect = getenv("STRIKERS_ASPECT");
+        if (envAspect)
+        {
+            if (strcmp(envAspect, "4:3") == 0) res = RESO_4_3;
+            else if (strcmp(envAspect, "16:9") == 0) res = RESO_16_9;
+            else if (strcmp(envAspect, "1:1") == 0) res = RESO_1_1;
+            else if (strcmp(envAspect, "3:2") == 0) res = RESO_3_2;
+            else if (strcmp(envAspect, "auto") == 0) res = RESO_AUTO;
+        }
+        const char* envScale = getenv("STRIKERS_RES_SCALE");
+        if (envScale)
+        {
+            float sc = (float)atof(envScale);
+            if (sc >= 0.5f && sc <= 2.0f) scale = sc;
+        }
+    }
+
+    s_currentResScale = scale;
+    PortSetRenderScale(s_currentResScale);
+    s_currentResolution = res;
+    Strikers_ApplyResolutionPreset(res, false);
+}
+
+float Strikers_GetCurrentResScale() { return s_currentResScale; }
+void Strikers_SetCurrentResScale(float scale) { s_currentResScale = scale; PortSetRenderScale(scale); }
 
 int Strikers_GetCutsceneSkin() { return s_optCutsceneSkin; }
 int Strikers_GetCutsceneCrowd() { return s_optCutsceneCrowd; }
@@ -207,3 +375,17 @@ int Strikers_GetFenceSparks() { return s_optFenceSparks; }
 float Strikers_GetFenceRate() { return s_optFenceRate; }
 int Strikers_GetEnableDof() { return s_optEnableDof; }
 int Strikers_GetMaxParticles() { return s_optMaxParticles; }
+int Strikers_GetGameplayShadows() { return s_optGameplayShadows; }
+void Strikers_SetGameplayShadows(int enable)
+{
+    s_optGameplayShadows = enable;
+    g_bDrawPlanarShadows = (enable != 0);
+    DrawableCharacter::sShadowRenderingDisabled = (enable == 0);
+}
+
+int Strikers_GetReplaysEnabled() { return s_optReplaysEnabled; }
+void Strikers_SetReplaysEnabled(int enable)
+{
+    s_optReplaysEnabled = (enable != 0 ? 1 : 0);
+    SavePresetToFile(s_currentPreset);
+}
