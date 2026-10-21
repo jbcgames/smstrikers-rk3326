@@ -1,5 +1,6 @@
 #include "NL/platpad.h"
 #include "port/overlay.h"
+#include "port/net_pad.h"
 #include <stdlib.h>
 #include "dolphin/os.h"
 
@@ -56,12 +57,54 @@ void VBlankPadUpdate()
     PADRead(PadStatus::s_Next);
     PADClampCircle(PadStatus::s_Next);
 
+    if (NetPad_IsConnected())
+    {
+        static uint32_t s_netFrameIndex = 0;
+        static bool s_wasConnected = false;
+        if (!s_wasConnected)
+        {
+            s_netFrameIndex = 0;
+            s_wasConnected = true;
+        }
+        s_netFrameIndex++;
+        if (NetPad_GetRole() == NET_ROLE_HOST)
+        {
+            NetPad_ProcessFrame(s_netFrameIndex, &PadStatus::s_Next[0], &PadStatus::s_Next[1]);
+        }
+        else if (NetPad_GetRole() == NET_ROLE_CLIENT)
+        {
+            PADStatus localPad = PadStatus::s_Next[0];
+            NetPad_ProcessFrame(s_netFrameIndex, &localPad, &PadStatus::s_Next[0]);
+            PadStatus::s_Next[1] = localPad;
+        }
+    }
+    else
+    {
+        NetPad_ProcessFrame(0, nullptr, nullptr);
+    }
+
+    // Gamepad shortcut to toggle overlay menu (useful for handhelds/consoles):
+    // Press L + R + START simultaneously on either controller (P1 or P2)
+    static bool s_padComboPrev = false;
+    const u16 kComboMask = (PAD_TRIGGER_L | PAD_TRIGGER_R | PAD_BUTTON_START);
+    bool padCombo = (((PadStatus::s_Next[0].button & kComboMask) == kComboMask) ||
+                     ((PadStatus::s_Next[1].button & kComboMask) == kComboMask));
+    if (padCombo && !s_padComboPrev)
+    {
+        PortOverlayToggleMenu();
+    }
+    s_padComboPrev = padCombo;
+
     if (PortOverlayMenuOpen())
     {
         PortDebugSetPad(0, (int)PadStatus::s_Next[0].err, (unsigned int)PadStatus::s_Next[0].button,
                         (int)PadStatus::s_Next[0].stickX, (int)PadStatus::s_Next[0].stickY,
                         (int)PadStatus::s_Next[0].substickX, (int)PadStatus::s_Next[0].substickY,
                         (int)PadStatus::s_Next[0].triggerLeft, (int)PadStatus::s_Next[0].triggerRight);
+        PortDebugSetPad(1, (int)PadStatus::s_Next[1].err, (unsigned int)PadStatus::s_Next[1].button,
+                        (int)PadStatus::s_Next[1].stickX, (int)PadStatus::s_Next[1].stickY,
+                        (int)PadStatus::s_Next[1].substickX, (int)PadStatus::s_Next[1].substickY,
+                        (int)PadStatus::s_Next[1].triggerLeft, (int)PadStatus::s_Next[1].triggerRight);
     }
 
     if (getenv("STRIKERS_PROBE_PAD") != NULL)

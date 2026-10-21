@@ -1,6 +1,7 @@
 #include "Game/Render/Indicators.h"
 
 #include "Game/AI/AiUtil.h"
+#include "Game/Camera/CameraMan.h"
 #include "Game/CharacterTemplate.h"
 #include "Game/CharacterTweaks.h"
 #include "Game/Game.h"
@@ -18,7 +19,7 @@
 #include "NL/nlMath.h"
 #include "types.h"
 
-static float s_fOverheadSize = 35.0f;
+static float s_fOverheadSize = 13.0f;
 static float s_fAdditiveBlendingIntensity = 0.55f;
 static float s_fAdditiveTextureScale = 1.25f;
 static float s_fPulseRate = 2.0f;
@@ -325,6 +326,12 @@ static void UpdateAndRenderPlayerIndicators(float)
         fY = 0.5f * glGetOrthographicHeight() * (v3ScreenPosition.y + 1.0f);
         fY -= switchScale;
 
+        // Calculate perspective scale based on 3D distance from camera
+        float distCam = cCameraManager::GetDistanceFromCameraToObject(v3Position);
+        float depthScale = (distCam > 1.0f) ? (28.0f / distCam) : 1.0f;
+        if (depthScale > 1.35f) depthScale = 1.35f;
+        if (depthScale < 0.55f) depthScale = 0.55f;
+
         // PORT: cPlayerIndicatorState was a stand-in reading cPlayer at console 0x19C and 0x1C8.
         cPlayer* pIndicatorPlayer = (cPlayer*)g_pCharacters[i];
 
@@ -333,9 +340,9 @@ static void UpdateAndRenderPlayerIndicators(float)
             switchScale = (0.5f - pIndicatorPlayer->m_UserControlledTime) / 0.5f;
             sizeScale = Interpolate(1.0f, 2.0f, switchScale);
 
-            DrawIndicator((int)fX, (int)fY, s_fAdditiveTextureScale * (s_fOverheadSize * sizeScale), s_fAdditiveTextureScale * (s_fOverheadSize * sizeScale), s_fAdditiveBlendingIntensity * switchScale, glowTexID, 0.0f, 2);
+            DrawIndicator((int)fX, (int)fY, s_fAdditiveTextureScale * (s_fOverheadSize * sizeScale * depthScale), s_fAdditiveTextureScale * (s_fOverheadSize * sizeScale * depthScale), s_fAdditiveBlendingIntensity * switchScale, glowTexID, 0.0f, 2);
 
-            fDistInPixels = s_fOverheadSize * sizeScale;
+            fDistInPixels = s_fOverheadSize * sizeScale * depthScale;
             DrawIndicator((int)fX, (int)fY, fDistInPixels, fDistInPixels, fOpacity, indicatorTexID, 0.0f, 1);
         }
         else if (pIndicatorPlayer->m_pBall)
@@ -347,13 +354,13 @@ static void UpdateAndRenderPlayerIndicators(float)
                 s_fGlowIntensityScale = 0.0f;
             }
 
-            DrawIndicator((int)fX, (int)fY, s_fOverheadSize * s_fAdditiveTextureScale, s_fOverheadSize * s_fAdditiveTextureScale, s_fAdditiveBlendingIntensity * (s_bPulseGlowTexture ? s_fGlowIntensityScale : 1.0f), glowTexID, 0.0f, 2);
-            fDistInPixels = s_fOverheadSize;
+            DrawIndicator((int)fX, (int)fY, s_fOverheadSize * s_fAdditiveTextureScale * depthScale, s_fOverheadSize * s_fAdditiveTextureScale * depthScale, s_fAdditiveBlendingIntensity * (s_bPulseGlowTexture ? s_fGlowIntensityScale : 1.0f), glowTexID, 0.0f, 2);
+            fDistInPixels = s_fOverheadSize * depthScale;
             DrawIndicator((int)fX, (int)fY, fDistInPixels, fDistInPixels, fOpacity, indicatorTexID, 0.0f, 1);
         }
         else
         {
-            fDistInPixels = s_fOverheadSize;
+            fDistInPixels = s_fOverheadSize * depthScale;
             DrawIndicator((int)fX, (int)fY, fDistInPixels, fDistInPixels, fOpacity, indicatorTexID, 0.0f, 1);
         }
     }

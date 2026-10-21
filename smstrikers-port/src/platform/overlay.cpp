@@ -12,6 +12,7 @@
 #include "port/input.h"
 #include "port/launch.h"
 #include "port/texture_packs.h"
+#include "port/net_pad.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -1598,6 +1599,158 @@ void draw_input_tab()
     }
 }
 
+static void draw_netplay_tab()
+{
+    ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f), "SUPER MARIO STRIKERS - MULTIJUGADOR ONLINE / LAN");
+    ImGui::Separator();
+
+    ImGui::Text("Estado: %s", NetPad_GetStateString());
+    ImGui::Spacing();
+
+    static char s_hostName[32] = "SMS-ArkOS";
+    static char s_connectIp[32] = "192.168.1.";
+    static char s_onlineRoomCode[16] = "";
+    static char s_createdRoomCode[16] = "";
+    static int s_port = NET_DEFAULT_PORT;
+
+    NetRole role = NetPad_GetRole();
+    NetState state = NetPad_GetState();
+
+    if (state == NET_STATE_DISCONNECTED)
+    {
+        if (ImGui::CollapsingHeader("Online por Internet (WAN - strikers.aprendizaje-guiado.com)", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            if (ImGui::Button("Crear Sala Online (Host)", ImVec2(220, 32)))
+            {
+                if (NetPad_CreateOnlineRoom(s_createdRoomCode, sizeof(s_createdRoomCode)))
+                {
+                    printf("[OVERLAY] Created online room: %s\n", s_createdRoomCode);
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("O unirse con codigo de sala:");
+            ImGui::InputText("Codigo de Sala", s_onlineRoomCode, sizeof(s_onlineRoomCode));
+            if (ImGui::Button("Unirse a Sala Online", ImVec2(200, 30)))
+            {
+                if (NetPad_JoinOnlineRoom(s_onlineRoomCode))
+                {
+                    printf("[OVERLAY] Joined online room: %s\n", s_onlineRoomCode);
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Red Local (LAN / Wi-Fi)", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::InputText("Nombre del Host", s_hostName, sizeof(s_hostName));
+            ImGui::InputInt("Puerto", &s_port);
+            if (ImGui::Button("Iniciar Servidor LAN", ImVec2(200, 30)))
+            {
+                NetPad_StartHost(s_hostName, (uint16_t)s_port);
+            }
+
+            ImGui::Spacing();
+            if (ImGui::Button("Buscar Partidas en Wi-Fi", ImVec2(200, 30)))
+            {
+                NetPad_StartClient((uint16_t)s_port);
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("O conectar directamente por IP:");
+            ImGui::InputText("IP del Host", s_connectIp, sizeof(s_connectIp));
+            if (ImGui::Button("Conectar a IP", ImVec2(150, 25)))
+            {
+                NetPad_ConnectTo(s_connectIp, (uint16_t)s_port);
+            }
+        }
+    }
+    else if (state == NET_STATE_BROADCASTING)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Esperando que un rival se conecte en la red LAN...");
+        ImGui::Text("Nombre: %s  |  Puerto: %d", s_hostName, s_port);
+        ImGui::Spacing();
+        if (ImGui::Button("Cancelar Servidor", ImVec2(160, 28)))
+        {
+            NetPad_Disconnect();
+        }
+    }
+    else if (state == NET_STATE_SEARCHING)
+    {
+        const char* onlineCode = NetPad_GetOnlineRoomCode();
+        if (onlineCode && onlineCode[0] != '\0' && role == NET_ROLE_HOST)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "SALA ONLINE CREADA EN WAN");
+            ImGui::Text("Comparte este codigo con tu rival:");
+            ImGui::SetWindowFontScale(1.8f);
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[ %s ]", onlineCode);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::Text("Esperando que el rival se una con el codigo...");
+
+            static uint32_t s_pollTimer = 0;
+            if (++s_pollTimer % 30 == 0)
+            {
+                char peerIp[64];
+                uint16_t peerPort;
+                NetPad_PollOnlineRoom(peerIp, &peerPort);
+            }
+        }
+        else
+        {
+            ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1.0f), "Conectando al Servidor de Señalizacion...");
+            NetDiscoveredHost hosts[NET_MAX_DISCOVERED];
+            int count = NetPad_GetDiscoveredHosts(hosts, NET_MAX_DISCOVERED);
+            if (count > 0)
+            {
+                for (int i = 0; i < count; ++i)
+                {
+                    ImGui::BulletText("%s (%s:%d)", hosts[i].hostname, hosts[i].ip, hosts[i].port);
+                    ImGui::SameLine();
+                    char btnLabel[64];
+                    snprintf(btnLabel, sizeof(btnLabel), "Unirse##%d", i);
+                    if (ImGui::Button(btnLabel))
+                    {
+                        NetPad_ConnectTo(hosts[i].ip, hosts[i].port);
+                    }
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        if (ImGui::Button("Cancelar Busqueda", ImVec2(160, 28)))
+        {
+            NetPad_Disconnect();
+        }
+    }
+    else if (state == NET_STATE_CONNECTED)
+    {
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "¡Partida en curso!");
+        ImGui::Text("Rol: %s", (role == NET_ROLE_HOST) ? "Host (Jugador 1)" : "Cliente (Jugador 2)");
+        ImGui::Text("Cuadro Remoto: %u", NetPad_GetRemoteFrame());
+        ImGui::Spacing();
+
+        ImGui::SeparatorText("Monitor en Vivo de Controles");
+        ImGui::Text("Jugador 1 (Port 0): Stick (%4d, %4d) | Botones: 0x%04X (err %d)",
+                    s_pad[0].stickX, s_pad[0].stickY, s_pad[0].buttons, s_pad[0].err);
+        ImGui::Text("Jugador 2 (Port 1): Stick (%4d, %4d) | Botones: 0x%04X (err %d)",
+                    s_pad[1].stickX, s_pad[1].stickY, s_pad[1].buttons, s_pad[1].err);
+        ImGui::Spacing();
+
+        int delay = (int)NetPad_GetInputDelay();
+        if (ImGui::SliderInt("Buffer de Entrada (Frames)", &delay, 1, 5))
+        {
+            NetPad_SetInputDelay((uint32_t)delay);
+        }
+        ImGui::TextDisabled("Retraso: %d ms (2 frames = 33 ms recomendado para LAN)", delay * 16);
+
+        ImGui::Spacing();
+        if (ImGui::Button("Desconectar Partida", ImVec2(180, 28)))
+        {
+            NetPad_Disconnect();
+        }
+    }
+}
+
 void draw_system_tab()
 {
     ImGui::SeparatorText("display");
@@ -2052,6 +2205,12 @@ void PortOverlayDraw(void)
     ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(560.0f, 620.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.92f);
+    static bool s_wasMenuOpen = false;
+    if (s_menuOpen && !s_wasMenuOpen)
+    {
+        ImGui::SetNextWindowFocus();
+    }
+    s_wasMenuOpen = s_menuOpen;
     bool open = true;
     if (ImGui::Begin("Super Mario Strikers debug", &open))
     {
@@ -2068,6 +2227,7 @@ void PortOverlayDraw(void)
                 ImGui::EndTabItem();
             }
             const Tab tabs[] = {
+                { "Netplay", draw_netplay_tab },
                 { "Match", draw_match_tab },   { "Players", draw_players_tab },
                 { "Items", draw_items_tab },   { "AI", draw_ai_tab },
                 { "Cheats", draw_cheats_tab }, { "Camera", draw_camera_tab },

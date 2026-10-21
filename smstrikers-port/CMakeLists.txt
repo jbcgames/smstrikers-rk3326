@@ -105,6 +105,10 @@ int main() { std::jthread t([](std::stop_token) {}); }
 ]])
     set(_saved_cxx_standard "${CMAKE_CXX_STANDARD}")
     set(_saved_required_flags "${CMAKE_REQUIRED_FLAGS}")
+    set(_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+    if(WIN32)
+        list(APPEND CMAKE_REQUIRED_LIBRARIES pthread)
+    endif()
     set(CMAKE_CXX_STANDARD 20)
     check_cxx_source_compiles("${_jthread_src}" PORT_JTHREAD_PLAIN)
     if(NOT PORT_JTHREAD_PLAIN)
@@ -125,7 +129,9 @@ int main() { std::jthread t([](std::stop_token) {}); }
             "$<$<LINK_LANGUAGE:CXX>:-fexperimental-library>")
     endif()
     set(CMAKE_REQUIRED_FLAGS "${_saved_required_flags}")
+    set(CMAKE_REQUIRED_LIBRARIES "${_saved_required_libraries}")
     unset(_saved_required_flags)
+    unset(_saved_required_libraries)
     set(CMAKE_CXX_STANDARD "${_saved_cxx_standard}")
 
     include(FetchContent)
@@ -436,14 +442,26 @@ endif()
 
 # The link test. Aurora, MusyX and the THP decoder are not wired up, so tools/genstubs.py supplies
 # an abort-on-call definition for each symbol they would provide.
-add_executable(strikers
-    $<TARGET_OBJECTS:strikers_game>
-    $<TARGET_OBJECTS:strikers_ode>
-    $<TARGET_OBJECTS:strikers_sdk>
-    $<TARGET_OBJECTS:strikers_platform>
-    $<TARGET_OBJECTS:strikers_operators>
-    $<TARGET_OBJECTS:strikers_musyx>
-)
+if(ANDROID)
+    add_library(strikers SHARED
+        $<TARGET_OBJECTS:strikers_game>
+        $<TARGET_OBJECTS:strikers_ode>
+        $<TARGET_OBJECTS:strikers_sdk>
+        $<TARGET_OBJECTS:strikers_platform>
+        $<TARGET_OBJECTS:strikers_operators>
+        $<TARGET_OBJECTS:strikers_musyx>
+    )
+    target_link_libraries(strikers PRIVATE android log GLESv3 EGL)
+else()
+    add_executable(strikers
+        $<TARGET_OBJECTS:strikers_game>
+        $<TARGET_OBJECTS:strikers_ode>
+        $<TARGET_OBJECTS:strikers_sdk>
+        $<TARGET_OBJECTS:strikers_platform>
+        $<TARGET_OBJECTS:strikers_operators>
+        $<TARGET_OBJECTS:strikers_musyx>
+    )
+endif()
 target_link_libraries(strikers PRIVATE port_flags)
 if(TARGET strikers_discord)
     target_sources(strikers PRIVATE $<TARGET_OBJECTS:strikers_discord>)
@@ -637,8 +655,10 @@ else()
     message(STATUS "Disc images: .iso/.gcm and .ciso; no zlib, so no .gcz")
 endif()
 
-# Dead-strip the debug classes (StatsGatherer, cFuzzyDebugger) whose vtables reference methods
-# defined only in files the decomp excludes, and which nothing ever constructs.
+if(WIN32)
+    target_link_libraries(strikers_platform PRIVATE winhttp ws2_32)
+    target_link_libraries(strikers PRIVATE winhttp ws2_32)
+endif()
 if(APPLE)
     target_link_options(strikers PRIVATE -dead_strip)
 elseif(MSVC)
@@ -657,6 +677,12 @@ if(APPLE)
     foreach(_sym __Znwm __Znam __ZdlPv __ZdaPv)
         target_link_options(strikers PRIVATE "-Wl,-unexported_symbol,${_sym}")
     endforeach()
+elseif(WIN32)
+    if(MSVC)
+        target_link_options(strikers PRIVATE -static-libstdc++ -static-libgcc)
+    else()
+        target_link_options(strikers PRIVATE -static-libstdc++ -static-libgcc -Wl,--whole-archive /usr/x86_64-w64-mingw32/lib/libpthread.a -Wl,--no-whole-archive)
+    endif()
 elseif(NOT MSVC AND NOT NX)
     # An ELF executable exports a definition a shared library needs, so libc++ would bind to the
     # game's operators exactly as dyld does.
