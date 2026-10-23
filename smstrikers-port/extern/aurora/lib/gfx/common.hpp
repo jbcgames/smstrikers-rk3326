@@ -24,9 +24,10 @@ namespace aurora {
 
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
-inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
-inline constexpr uint64_t VertexBufferSize = 5242880;    // 5mb
-inline constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
+// smstrikers-port: Strikers' largest frame needs 12.9 MB of vertices, 298k u16 indices and 2.2 MB of uniforms.
+inline constexpr uint64_t UniformBufferSize = 4194304;   // 4mb
+inline constexpr uint64_t VertexBufferSize = 16777216;   // 16mb
+inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
 inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
