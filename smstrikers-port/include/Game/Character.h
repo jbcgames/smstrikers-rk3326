@@ -291,4 +291,6 @@ public:
 //     /* 0x04 */ glModel* pModel;
 // };
 
+extern cCharacter* g_pCurrentlyUpdatingCharacter;
+
 #endif // _CHARACTER_H_

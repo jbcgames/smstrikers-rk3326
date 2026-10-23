@@ -8,6 +8,8 @@
 #include "NL/gl/glModel.h"
 #include "NL/gl/glState.h"
 #include "NL/gl/glUserData.h"
+#include <cmath>
+#include <stdio.h>
 
 static int g_nMotionBlurDivs = 5;
 static float g_fMotionBlurAlpha0 = 0.1f;
@@ -161,11 +163,37 @@ void DrawableBall::Render() const
         return;
     }
 
+    nlQuaternion validOrientation = mOrientation;
+    float quatLenSq = validOrientation.x * validOrientation.x + validOrientation.y * validOrientation.y +
+                      validOrientation.z * validOrientation.z + validOrientation.w * validOrientation.w;
+    if (quatLenSq < 0.0001f || std::isnan(quatLenSq))
+    {
+        validOrientation.x = 0.0f;
+        validOrientation.y = 0.0f;
+        validOrientation.z = 0.0f;
+        validOrientation.w = 1.0f;
+    }
+    else
+    {
+        nlQuatNormalize(validOrientation, validOrientation);
+    }
+
     DrawableObject* pDrawableBall = g_pBall->GetDrawableBall();
-    pDrawableBall->m_orientation = mOrientation;
+    pDrawableBall->m_orientation = validOrientation;
     pDrawableBall->m_worldMatrixUpToDate = 0;
     pDrawableBall->m_translation = mPosition;
     pDrawableBall->m_worldMatrixUpToDate = 0;
+
+    static uint32_t s_drawLogCounter = 0;
+    if (++s_drawLogCounter % 50 == 0)
+    {
+        printf("[DRAW_BALL_LOG] Pos: (%.2f, %.2f, %.2f) | Quat: (%.2f, %.2f, %.2f, %.2f) | Visible: %d | Flags: 0x%X\n",
+               mPosition.x, mPosition.y, mPosition.z,
+               validOrientation.x, validOrientation.y, validOrientation.z, validOrientation.w,
+               mVisible ? 1 : 0,
+               pDrawableBall ? pDrawableBall->m_uObjectFlags : 0);
+        fflush(stdout);
+    }
 
     unsigned long uSavedFlags = pDrawableBall->m_uObjectCreationFlags;
     pDrawableBall->m_uObjectCreationFlags &= ~0x80;

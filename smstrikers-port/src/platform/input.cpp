@@ -551,13 +551,15 @@ void apply_gamepad(u32 port, bool report)
 
     if (PADDeadZones* dz = PADGetDeadZones(port))
     {
+        float f = 0.20f; // Handheld default 20% deadzone to prevent stick drift
         if (const char* v = input_cfg("STRIKERS_PAD_DEADZONE"))
         {
-            const float f = clampf((float)std::atof(v), 0.0f, 0.9f);
-            dz->useDeadzones = f > 0.0f;
-            dz->stickDeadZone = axis_fraction(f);
-            dz->substickDeadZone = axis_fraction(f);
+            f = clampf((float)std::atof(v), 0.0f, 0.9f);
         }
+        dz->useDeadzones = f > 0.0f;
+        dz->stickDeadZone = axis_fraction(f);
+        dz->substickDeadZone = axis_fraction(f);
+
         if (const char* v = input_cfg("STRIKERS_PAD_TRIGGER_THRESHOLD"))
         {
             const u16 z = axis_fraction((float)std::atof(v));

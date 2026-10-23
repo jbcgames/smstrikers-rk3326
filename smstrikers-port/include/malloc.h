@@ -1,7 +1,10 @@
 #ifndef PORT_MSL_MALLOC_H
 #define PORT_MSL_MALLOC_H
-// Port shim for MSL's <malloc.h>: malloc and friends come from <stdlib.h> and src/platform/msl_arena.cpp implements the arena helpers.
-#include <stdlib.h>
+#if defined(__has_include_next) && __has_include_next(<malloc.h>)
+# include_next <malloc.h>
+#else
+# include <stdlib.h>
+#endif
 #include <stddef.h>
 #ifdef __cplusplus
 extern "C" {

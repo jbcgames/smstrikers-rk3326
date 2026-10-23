@@ -9,7 +9,9 @@
 #if defined(__SWITCH__)
 // Horizon has no signals and no mprotect, so only the snapshot watch below runs there.
 #elif !defined(_WIN32)
+#if !defined(__ANDROID__)
 #include <execinfo.h>
+#endif
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -438,7 +440,9 @@ static void prot_handler(int sig, siginfo_t* si, void* ucv)
 
         void* frames[32];
         int n = prot_walk(frames, 32, pc, lr, fp);
+#if !defined(__ANDROID__)
         backtrace_symbols_fd(frames, n, 2);
+#endif
         prot_puts("[morphprot] end of report\n");
     }
 

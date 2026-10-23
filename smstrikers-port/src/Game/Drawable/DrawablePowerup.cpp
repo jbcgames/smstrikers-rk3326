@@ -6,6 +6,7 @@
 #include "NL/gl/glState.h"
 #include "NL/nlString.h"
 #include "port/GraphicsPresets.h"
+#include "port/net_pad.h"
 
 namespace
 {
@@ -154,6 +155,20 @@ PowerupBase* DrawablePowerup::GetPowerup(int idx) const
     return FindPowerUp(GetPowerupHash(idx));
 }
 
+static int GetPowerupBaseIndex(int type)
+{
+    switch (type)
+    {
+    case POWER_UP_FREEZE_SHELL: return 0;
+    case POWER_UP_SPINY_SHELL:  return 25;
+    case POWER_UP_GREEN_SHELL:  return 50;
+    case POWER_UP_RED_SHELL:    return 75;
+    case POWER_UP_BANANA:       return 100;
+    case POWER_UP_BOBOMB:       return 125;
+    default: return -1;
+    }
+}
+
 /**
  * Offset/Address/Size: 0x374 | 0x8011EFE8 | size: 0x190
  */
@@ -168,11 +183,38 @@ void DrawablePowerup::Grab(int idx)
         mOrientation = powerup->m_aOrientation;
         mPosition = powerup->m_v3Position;
         mScale = powerup->m_scale;
+        return;
     }
-    else
+
+    bool isNetClient = NetPad_IsConnected() && (NetPad_GetRole() == NET_ROLE_CLIENT);
+    if (isNetClient)
     {
-        mVisible = false;
+        NetWorldState ws;
+        if (NetPad_GetLatestWorldState(&ws))
+        {
+            for (int k = 0; k < ws.num_field_powerups && k < 8; k++)
+            {
+                if (ws.field_powerups[k].active)
+                {
+                    int baseIdx = GetPowerupBaseIndex(ws.field_powerups[k].type);
+                    if (baseIdx >= 0 && idx == (baseIdx + k))
+                    {
+                        mType = (ePowerUpType)ws.field_powerups[k].type;
+                        mVisible = true;
+                        mRadius = 1.0f;
+                        mOrientation = ws.field_powerups[k].orientation;
+                        mPosition.x = ws.field_powerups[k].posX;
+                        mPosition.y = ws.field_powerups[k].posY;
+                        mPosition.z = ws.field_powerups[k].posZ;
+                        mScale = 1.0f;
+                        return;
+                    }
+                }
+            }
+        }
     }
+
+    mVisible = false;
 }
 
 /**

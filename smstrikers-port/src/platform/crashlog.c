@@ -10,9 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__SWITCH__)
+#if defined(__SWITCH__) || defined(__ANDROID__)
 
-// Horizon has no signals and newlib no execinfo; Atmosphere writes the crash report instead.
+// Horizon and Android have no execinfo; OS/debuggerd handles crash dumps.
 
 #elif !defined(_WIN32)
 
@@ -284,7 +284,9 @@ __attribute__((constructor)) static void port_install_crash_handler(void)
     if (port_headless)
     {
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#if defined(_MSC_VER)
         _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     }
 
     SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);

@@ -36,6 +36,8 @@ extern "C" void Android_UnlockActivityMutex(void);
 #include "time_internal.hpp"
 #include "dolphin/vi/vi_internal.hpp"
 
+extern "C" void PortOverlayToggleMenu(void);
+
 namespace aurora::window {
 namespace {
 constexpr Module Log{"aurora::window"};
@@ -225,6 +227,21 @@ void process_event(SDL_Event& event) {
         g_events.push_back(AuroraEvent{
             .type = AURORA_EXIT,
         });
+      }
+
+      // Overlay menu combos for handhelds / gamepads
+      const bool leftUpper = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) ||
+                             (SDL_GetGamepadAxis(ctrl, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000);
+      const bool rightUpper = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) ||
+                              (SDL_GetGamepadAxis(ctrl, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000);
+      const bool anyX = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_NORTH) ||
+                        SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_WEST);
+      const bool l3r3 = SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+                        SDL_GetGamepadButton(ctrl, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+
+      if ((leftUpper && rightUpper && startPressed) || (backPressed && anyX) || l3r3) {
+        Log.info("Overlay toggle menu combo triggered from gamepad");
+        PortOverlayToggleMenu();
       }
     }
     break;

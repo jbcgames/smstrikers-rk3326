@@ -20,7 +20,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <Windows.h>
+#include <windows.h>
 #elif defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -270,7 +270,12 @@ void set_thread_name(const std::string& name) noexcept {
   std::wstring wideName;
   wideName.resize(static_cast<size_t>(length));
   MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wideName.data(), length);
-  SetThreadDescription(GetCurrentThread(), wideName.c_str());
+  using SetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+  static auto pfnSetThreadDescription = reinterpret_cast<SetThreadDescriptionFn>(
+      GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription"));
+  if (pfnSetThreadDescription) {
+    pfnSetThreadDescription(GetCurrentThread(), wideName.c_str());
+  }
 #elif defined(__APPLE__)
   const std::string truncated = name.substr(0, 63);
   pthread_setname_np(truncated.c_str());

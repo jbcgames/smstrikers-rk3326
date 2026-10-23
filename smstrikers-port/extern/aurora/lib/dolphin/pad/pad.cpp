@@ -819,6 +819,46 @@ u32 PADRead(PADStatus* status) {
       auto xl = static_cast<Sint16>((xlPos + -xlNeg) / 2);
       // SDL's gamepad y-axis is inverted from GC's
       auto yl = static_cast<Sint16>((-ylPos + ylNeg) / 2);
+
+      // Dynamic auto-centering to compensate for hardware potentiometer offset/drift on handhelds
+      static int s_calibFrames[PAD_CHANMAX] = {0};
+      static int32_t s_sumX[PAD_CHANMAX] = {0};
+      static int32_t s_sumY[PAD_CHANMAX] = {0};
+      static int16_t s_offsetX[PAD_CHANMAX] = {0};
+      static int16_t s_offsetY[PAD_CHANMAX] = {0};
+      static bool s_calibrated[PAD_CHANMAX] = {false};
+
+      if (!s_calibrated[i]) {
+        s_sumX[i] += xl;
+        s_sumY[i] += yl;
+        s_calibFrames[i]++;
+        if (s_calibFrames[i] >= 20) {
+          s_offsetX[i] = static_cast<int16_t>(s_sumX[i] / 20);
+          s_offsetY[i] = static_cast<int16_t>(s_sumY[i] / 20);
+          s_calibrated[i] = true;
+        }
+      }
+
+      if (s_calibrated[i]) {
+        int32_t adjX = xl - s_offsetX[i];
+        int32_t adjY = yl - s_offsetY[i];
+
+        if (adjX > 0 && s_offsetX[i] < 30000) {
+          adjX = (adjX * 32767) / (32767 - s_offsetX[i]);
+        } else if (adjX < 0 && s_offsetX[i] > -30000) {
+          adjX = (adjX * 32768) / (32768 + s_offsetX[i]);
+        }
+
+        if (adjY > 0 && s_offsetY[i] < 30000) {
+          adjY = (adjY * 32767) / (32767 - s_offsetY[i]);
+        } else if (adjY < 0 && s_offsetY[i] > -30000) {
+          adjY = (adjY * 32768) / (32768 + s_offsetY[i]);
+        }
+
+        xl = static_cast<Sint16>(std::clamp<int32_t>(adjX, -32768, 32767));
+        yl = static_cast<Sint16>(std::clamp<int32_t>(adjY, -32768, 32767));
+      }
+
       if (controller->m_deadZones.useDeadzones) {
         if (std::abs(xl) > controller->m_deadZones.stickDeadZone) {
           xl /= 256;
@@ -826,13 +866,13 @@ u32 PADRead(PADStatus* status) {
           xl = 0;
         }
         if (std::abs(yl) > controller->m_deadZones.stickDeadZone) {
-          yl = static_cast<Sint16>(-(yl + 1u) / 256u);
+          yl = static_cast<Sint16>(-static_cast<int32_t>(yl) / 256);
         } else {
           yl = 0;
         }
       } else {
         xl /= 256;
-        yl = static_cast<Sint16>(-(yl + 1u) / 256u);
+        yl = static_cast<Sint16>(-static_cast<int32_t>(yl) / 256);
       }
 
       status[i].stickX = static_cast<int8_t>(xl);
@@ -854,13 +894,13 @@ u32 PADRead(PADStatus* status) {
         }
 
         if (std::abs(yr) > controller->m_deadZones.substickDeadZone) {
-          yr = static_cast<Sint16>(-(yr + 1u) / 256u);
+          yr = static_cast<Sint16>(-static_cast<int32_t>(yr) / 256);
         } else {
           yr = 0;
         }
       } else {
         xr /= 256;
-        yr = static_cast<Sint16>(-(yr + 1u) / 256u);
+        yr = static_cast<Sint16>(-static_cast<int32_t>(yr) / 256);
       }
 
       status[i].substickX = static_cast<int8_t>(xr);

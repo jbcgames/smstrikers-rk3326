@@ -118,11 +118,12 @@ void NetPad_SendWorldState(const NetWorldState* state);
 bool NetPad_PollWorldState(NetWorldState* outState);
 bool NetPad_GetLatestWorldState(NetWorldState* outState);
 
-// Online WAN Room Signaling & NAT Hole Punching
-bool NetPad_CreateOnlineRoom(char* outRoomCode, size_t maxLen);
+bool NetPad_CreateOnlineRoom(const char* hostName, char* outRoomCode, size_t maxLen);
+int NetPad_GetOnlineRooms(NetDiscoveredHost* outHosts, int maxHosts);
 bool NetPad_JoinOnlineRoom(const char* roomCode);
 bool NetPad_PollOnlineRoom(char* outPeerIp, uint16_t* outPeerPort);
 const char* NetPad_GetOnlineRoomCode();
+void NetMenu_Tick(void);
 
 #ifdef __cplusplus
 }

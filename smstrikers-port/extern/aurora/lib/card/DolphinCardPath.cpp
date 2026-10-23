@@ -5,7 +5,11 @@
 #if WIN32
 #include "windows.h"
 #include "winreg.h"
-#include "shlobj_core.h"
+#if __has_include(<shlobj_core.h>)
+#include <shlobj_core.h>
+#else
+#include <shlobj.h>
+#endif
 #endif
 
 #include <SDL3/SDL_filesystem.h>
@@ -52,9 +56,9 @@ std::string ResolveDolphinCardPath(ECardSlot slot, const char* regionCode, bool 
   }
 
   /* Get My Documents path in case we need it. */
-  PWSTR my_documents;
+  wchar_t my_documents[MAX_PATH] = {0};
   bool my_documents_found =
-      SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, NULL, &my_documents));
+      SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, 0, my_documents));
 
   std::wstring w_path;
   if (configPath[0]) /* Case 1 */

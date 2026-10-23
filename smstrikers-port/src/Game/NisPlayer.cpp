@@ -19,7 +19,7 @@
 #include "string.h"
 
 extern unsigned long cupTrophyHash;
-extern "C" int sscanf(const char*, const char*, ...);
+#include <stdio.h>
 
 namespace
 {

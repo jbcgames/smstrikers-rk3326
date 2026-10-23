@@ -1,7 +1,7 @@
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/AuroraTargetPlatform.cmake")
 
-if (EXISTS "/home/jbc/sdl3-shim/libSDL3.so")
+if (NOT WIN32 AND NOT ANDROID AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm" AND EXISTS "/home/jbc/sdl3-shim/libSDL3.so")
   if (NOT TARGET SDL3::SDL3)
     add_library(SDL3::SDL3 SHARED IMPORTED GLOBAL)
     set(_sdl3_inc "/home/jbc/sdl3-shim/include")

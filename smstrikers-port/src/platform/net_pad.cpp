@@ -29,6 +29,7 @@
     #include <sys/socket.h>
     #include <sys/time.h>
     #include <netinet/in.h>
+    #include <netinet/tcp.h>
     #include <arpa/inet.h>
     #include <netdb.h>
     #include <fcntl.h>
@@ -116,6 +117,10 @@ static char g_onlineRoomCode[16] = { 0 };
 static char g_peerWanIp[64] = { 0 };
 static char g_peerLanIp[64] = { 0 };
 static uint16_t g_peerPort = NET_DEFAULT_PORT;
+static uint32_t g_relayIpAddr = 0;
+static bool g_udpPeerLocked = false;
+static bool g_udpIsDirect = false;
+static std::chrono::steady_clock::time_point g_lastUdpPacketTime;
 
 static NetRole  g_role = NET_ROLE_NONE;
 static NetState g_state = NET_STATE_DISCONNECTED;
@@ -187,6 +192,19 @@ static void entry_to_pad(const NetPadEntry* in, PADStatus* out) {
     }
 }
 
+static void reset_session_buffers() {
+    memset(g_localRing, 0, sizeof(g_localRing));
+    memset(g_remoteRing, 0, sizeof(g_remoteRing));
+    memset(g_remoteRingValid, 0, sizeof(g_remoteRingValid));
+    g_remoteLastFrame = 0;
+    g_udpPeerLocked = false;
+    g_udpIsDirect = false;
+    g_hasReceivedWorldState = false;
+    g_hasNewWorldState = false;
+}
+
+static void send_lan_discovery_sweep(const void* pkt, size_t pktLen, uint16_t targetPort, bool fullSubnetSweep);
+
 bool NetPad_Init(uint16_t port) {
     std::lock_guard<std::recursive_mutex> lock(g_netMutex);
 #ifdef _WIN32
@@ -205,6 +223,17 @@ bool NetPad_Init(uint16_t port) {
     if (g_socket == INVALID_SOCKET) {
         return false;
     }
+
+#ifdef _WIN32
+    // Evitar que ICMP Port Unreachable cierre/bloquee el socket UDP en Windows (Error 10054)
+    BOOL bNewBehavior = FALSE;
+    DWORD dwBytesReturned = 0;
+    #ifndef SIO_UDP_CONNRESET
+        #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+    #endif
+    WSAIoctl(g_socket, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior),
+             NULL, 0, &dwBytesReturned, NULL, NULL);
+#endif
 
     int broadcast = 1;
     setsockopt(g_socket, SOL_SOCKET, SO_BROADCAST, (const char*)&broadcast, sizeof(broadcast));
@@ -249,38 +278,64 @@ void NetPad_Shutdown(void) {
         CLOSE_SOCKET(g_socket);
         g_socket = INVALID_SOCKET;
     }
+    if (g_wsSocket != INVALID_SOCKET) {
+        CLOSE_SOCKET(g_wsSocket);
+        g_wsSocket = INVALID_SOCKET;
+    }
     g_state = NET_STATE_DISCONNECTED;
     g_role = NET_ROLE_NONE;
     g_hasRemoteAddr = false;
+    g_udpPeerLocked = false;
+    g_udpIsDirect = false;
 #ifdef _WIN32
     WSACleanup();
 #endif
 }
 
 void NetPad_StartHost(const char* hostName, uint16_t port) {
-    if (g_socket == INVALID_SOCKET) {
-        NetPad_Init(port);
-    }
+    NetPad_Init(port);
     std::lock_guard<std::recursive_mutex> lock(g_netMutex);
     g_role = NET_ROLE_HOST;
     g_state = NET_STATE_BROADCASTING;
     if (hostName && hostName[0] != '\0') {
         strncpy(g_localHostname, hostName, sizeof(g_localHostname) - 1);
+        g_localHostname[sizeof(g_localHostname) - 1] = '\0';
     }
-    // Generate a fresh random seed for this match
     g_syncSeed = (uint32_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
     g_hasRemoteAddr = false;
+    g_onlineRoomCode[0] = '\0';
+    g_peerWanIp[0] = '\0';
+    g_peerLanIp[0] = '\0';
+    reset_session_buffers();
+
+    DiscoveryPacket pong;
+    memset(&pong, 0, sizeof(pong));
+    pong.header.magic = SMS_NET_MAGIC;
+    pong.header.type = PKT_DISCOVERY_PONG;
+    pong.header.role = (uint8_t)NET_ROLE_HOST;
+    strncpy(pong.hostname, g_localHostname, sizeof(pong.hostname) - 1);
+    pong.game_port = port;
+    send_lan_discovery_sweep(&pong, sizeof(pong), port, true);
 }
 
 void NetPad_StartClient(uint16_t port) {
-    if (g_socket == INVALID_SOCKET) {
-        NetPad_Init(port);
-    }
+    NetPad_Init(port);
     std::lock_guard<std::recursive_mutex> lock(g_netMutex);
     g_role = NET_ROLE_CLIENT;
     g_state = NET_STATE_SEARCHING;
     g_discoveredHosts.clear();
     g_hasRemoteAddr = false;
+    g_onlineRoomCode[0] = '\0';
+    g_peerWanIp[0] = '\0';
+    g_peerLanIp[0] = '\0';
+    reset_session_buffers();
+
+    NetHeader ping;
+    ping.magic = SMS_NET_MAGIC;
+    ping.type = PKT_DISCOVERY_PING;
+    ping.role = (uint8_t)NET_ROLE_CLIENT;
+    ping.seq = 0;
+    send_lan_discovery_sweep(&ping, sizeof(ping), NET_DEFAULT_PORT, true);
 }
 
 void NetPad_ConnectTo(const char* ip, uint16_t port) {
@@ -300,11 +355,17 @@ void NetPad_ConnectTo(const char* ip, uint16_t port) {
     req.role = (uint8_t)NET_ROLE_CLIENT;
     req.seq = 0;
 
-    sendto(g_socket, (const char*)&req, sizeof(req), 0,
-           (struct sockaddr*)&g_remoteAddr, sizeof(g_remoteAddr));
+    for (int i = 0; i < 3; ++i) {
+        sendto(g_socket, (const char*)&req, sizeof(req), 0,
+               (struct sockaddr*)&g_remoteAddr, sizeof(g_remoteAddr));
+    }
 
     g_state = NET_STATE_CONNECTING;
+    // CRÍTICO: Inicializar g_lastPacketTime para que NetPad_ProcessFrame no desconecte en el primer frame
+    g_lastPacketTime = std::chrono::steady_clock::now();
 }
+
+static void send_ws_binary(const void* payload, size_t len);
 
 void NetPad_Disconnect(void) {
     std::lock_guard<std::recursive_mutex> lock(g_netMutex);
@@ -317,65 +378,77 @@ void NetPad_Disconnect(void) {
         sendto(g_socket, (const char*)&disc, sizeof(disc), 0,
                (struct sockaddr*)&g_remoteAddr, sizeof(g_remoteAddr));
     }
-    g_state = NET_STATE_DISCONNECTED;
-    g_role = NET_ROLE_NONE;
-    g_hasRemoteAddr = false;
     if (g_wsSocket != INVALID_SOCKET) {
+        NetHeader disc;
+        disc.magic = SMS_NET_MAGIC;
+        disc.type = PKT_DISCONNECT;
+        disc.role = (uint8_t)g_role;
+        disc.seq = 0;
+        send_ws_binary(&disc, sizeof(disc));
         CLOSE_SOCKET(g_wsSocket);
         g_wsSocket = INVALID_SOCKET;
     }
+    g_state = NET_STATE_DISCONNECTED;
+    g_role = NET_ROLE_NONE;
+    g_hasRemoteAddr = false;
+    g_onlineRoomCode[0] = '\0';
+    g_peerWanIp[0] = '\0';
+    g_peerLanIp[0] = '\0';
+    reset_session_buffers();
 }
 
-static std::vector<uint8_t> encode_ws_frame(const uint8_t* payload, size_t len)
+static void encode_ws_frame(const uint8_t* payload, size_t len, uint8_t* outFrame, size_t* outFrameLen)
 {
-    std::vector<uint8_t> frame;
-    frame.push_back(0x82);
+    size_t headerLen = 2;
+    outFrame[0] = 0x82;
 
     if (len <= 125) {
-        frame.push_back((uint8_t)(len | 0x80));
+        outFrame[1] = (uint8_t)(len | 0x80);
     } else if (len <= 65535) {
-        frame.push_back(126 | 0x80);
-        frame.push_back((uint8_t)((len >> 8) & 0xFF));
-        frame.push_back((uint8_t)(len & 0xFF));
+        outFrame[1] = 126 | 0x80;
+        outFrame[2] = (uint8_t)((len >> 8) & 0xFF);
+        outFrame[3] = (uint8_t)(len & 0xFF);
+        headerLen = 4;
     } else {
-        frame.push_back(127 | 0x80);
+        outFrame[1] = 127 | 0x80;
         for (int i = 7; i >= 0; i--) {
-            frame.push_back((uint8_t)((len >> (i * 8)) & 0xFF));
+            outFrame[2 + i] = (uint8_t)((len >> ((7 - i) * 8)) & 0xFF);
         }
+        headerLen = 10;
     }
 
     uint8_t mask[4] = { 0x12, 0x34, 0x56, 0x78 };
     for (int i = 0; i < 4; i++) {
-        frame.push_back(mask[i]);
+        outFrame[headerLen++] = mask[i];
     }
 
     for (size_t i = 0; i < len; i++) {
-        frame.push_back(payload[i] ^ mask[i % 4]);
+        outFrame[headerLen++] = payload[i] ^ mask[i % 4];
     }
 
-    return frame;
+    *outFrameLen = headerLen;
 }
 
-static bool decode_ws_frame(const uint8_t* buf, size_t bufLen, std::vector<uint8_t>& outPayload, size_t& consumedBytes)
+static bool decode_ws_frame(const uint8_t* buf, size_t bufLen, uint8_t* outPayload,
+                            size_t maxOutLen, size_t* outPayloadLen, size_t* consumedBytes, uint8_t* outOpcode)
 {
     if (bufLen < 2) return false;
 
-    uint8_t b0 = buf[0];
+    uint8_t opcode = buf[0] & 0x0F;
     uint8_t b1 = buf[1];
-
     bool masked = (b1 & 0x80) != 0;
     uint64_t payloadLen = b1 & 0x7F;
 
     size_t headerLen = 2;
     if (payloadLen == 126) {
         if (bufLen < 4) return false;
-        payloadLen = (buf[2] << 8) | buf[3];
+        payloadLen = ((uint64_t)buf[2] << 8) | buf[3];
         headerLen = 4;
     } else if (payloadLen == 127) {
         if (bufLen < 10) return false;
         payloadLen = 0;
         for (int i = 0; i < 8; i++) {
-            payloadLen = (payloadLen << 8) | buf[4 + i];
+            payloadLen = (payloadLen << 8) | buf[2 + i];
         }
         headerLen = 10;
     }
@@ -387,15 +460,23 @@ static bool decode_ws_frame(const uint8_t* buf, size_t bufLen, std::vector<uint8
         headerLen += 4;
     }
 
+    if (payloadLen > maxOutLen) {
+        *consumedBytes = bufLen;
+        *outPayloadLen = 0;
+        if (outOpcode) *outOpcode = opcode;
+        return false;
+    }
+
     if (bufLen < headerLen + payloadLen) return false;
 
-    outPayload.resize(payloadLen);
+    if (outOpcode) *outOpcode = opcode;
+    *outPayloadLen = (size_t)payloadLen;
     for (size_t i = 0; i < payloadLen; i++) {
         uint8_t byte = buf[headerLen + i];
         outPayload[i] = masked ? (byte ^ maskKey[i % 4]) : byte;
     }
 
-    consumedBytes = headerLen + payloadLen;
+    *consumedBytes = headerLen + (size_t)payloadLen;
     return true;
 }
 
@@ -403,32 +484,36 @@ static bool send_ws_text(SOCKET sock, const char* text)
 {
     if (sock == INVALID_SOCKET) return false;
     size_t len = strlen(text);
-    std::vector<uint8_t> frame;
-    frame.push_back(0x81);
+
+    uint8_t frame[2048];
+    size_t headerLen = 2;
+    frame[0] = 0x81;
 
     if (len <= 125) {
-        frame.push_back((uint8_t)(len | 0x80));
+        frame[1] = (uint8_t)(len | 0x80);
     } else if (len <= 65535) {
-        frame.push_back(126 | 0x80);
-        frame.push_back((uint8_t)((len >> 8) & 0xFF));
-        frame.push_back((uint8_t)(len & 0xFF));
+        frame[1] = 126 | 0x80;
+        frame[2] = (uint8_t)((len >> 8) & 0xFF);
+        frame[3] = (uint8_t)(len & 0xFF);
+        headerLen = 4;
     } else {
-        frame.push_back(127 | 0x80);
+        frame[1] = 127 | 0x80;
         for (int i = 7; i >= 0; i--) {
-            frame.push_back((uint8_t)((len >> (i * 8)) & 0xFF));
+            frame[2 + i] = (uint8_t)((len >> ((7 - i) * 8)) & 0xFF);
         }
+        headerLen = 10;
     }
 
     uint8_t mask[4] = { 0x12, 0x34, 0x56, 0x78 };
     for (int i = 0; i < 4; i++) {
-        frame.push_back(mask[i]);
+        frame[headerLen++] = mask[i];
     }
 
     for (size_t i = 0; i < len; i++) {
-        frame.push_back(((const uint8_t*)text)[i] ^ mask[i % 4]);
+        frame[headerLen++] = ((const uint8_t*)text)[i] ^ mask[i % 4];
     }
 
-    int sent = send(sock, (const char*)frame.data(), (int)frame.size(), 0);
+    int sent = send(sock, (const char*)frame, (int)headerLen, 0);
     return (sent > 0);
 }
 
@@ -489,9 +574,13 @@ static bool connect_websocket_signaling(const char* host, int port)
 #if defined(_WIN32)
     u_long mode = 1;
     ioctlsocket(sock, FIONBIO, &mode);
+    int flag = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
 #else
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    int flag = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
 #endif
 
     g_wsSocket = sock;
@@ -501,49 +590,99 @@ static bool connect_websocket_signaling(const char* host, int port)
 static void send_ws_binary(const void* payload, size_t len)
 {
     if (g_wsSocket == INVALID_SOCKET) return;
-    std::vector<uint8_t> frame = encode_ws_frame((const uint8_t*)payload, len);
-    send(g_wsSocket, (const char*)frame.data(), (int)frame.size(), 0);
+    uint8_t frame[2048];
+    if (len + 14 > sizeof(frame)) return;
+    size_t frameLen = 0;
+    encode_ws_frame((const uint8_t*)payload, len, frame, &frameLen);
+    send(g_wsSocket, (const char*)frame, (int)frameLen, 0);
 }
 
 static void send_stun_pings(const char* wanIp, const char* lanIp, uint16_t port);
+static void parse_json_field(const char* json, const char* key, char* outVal, size_t maxLen);
+static void send_lan_discovery_sweep(const void* pkt, size_t pktLen, uint16_t targetPort, bool fullSubnetSweep);
 
 static void process_incoming_packets() {
     if (g_wsSocket != INVALID_SOCKET) {
-        uint8_t wsBuf[2048];
-        int wsBytes = recv(g_wsSocket, (char*)wsBuf, sizeof(wsBuf), 0);
-        if (wsBytes > 0) {
-            std::vector<uint8_t> payload;
-            size_t consumed = 0;
-            if (decode_ws_frame(wsBuf, wsBytes, payload, consumed) && payload.size() >= sizeof(NetHeader)) {
-                const NetHeader* hdr = (const NetHeader*)payload.data();
-                if (hdr->magic == SMS_NET_MAGIC) {
-                    if (hdr->type == PKT_HEARTBEAT_CRC) {
-                        g_lastPacketTime = std::chrono::steady_clock::now();
-                        g_state = NET_STATE_CONNECTED;
-                    }
-                    else if (hdr->type == PKT_WORLD_STATE && payload.size() >= sizeof(WorldStatePacket)) {
-                        const WorldStatePacket* pkt = (const WorldStatePacket*)payload.data();
-                        g_latestWorldState = pkt->state;
-                        g_hasNewWorldState = true;
-                        g_hasReceivedWorldState = true;
-                        g_lastPacketTime = std::chrono::steady_clock::now();
-                        g_state = NET_STATE_CONNECTED;
-                    }
-                    else if (hdr->type == PKT_INPUT_FRAME && payload.size() >= sizeof(NetHeader) + 1) {
-                        const InputBundlePacket* pkt = (const InputBundlePacket*)payload.data();
-                        int maxCount = (payload.size() - sizeof(NetHeader) - 1) / sizeof(NetPadEntry);
-                        int count = std::min((int)pkt->count, std::min(maxCount, 3));
-                        for (int i = 0; i < count; ++i) {
-                            uint32_t f = pkt->frames[i].frame_index;
-                            int idx = f % RING_BUFFER_SIZE;
-                            g_remoteRing[idx] = pkt->frames[i];
-                            g_remoteRingValid[idx] = true;
-                            if (f > g_remoteLastFrame) {
-                                g_remoteLastFrame = f;
-                            }
+        uint8_t wsBuf[4096];
+        while (true) {
+            int wsBytes = recv(g_wsSocket, (char*)wsBuf, sizeof(wsBuf), 0);
+            if (wsBytes <= 0) break;
+
+            size_t offset = 0;
+            while (offset < (size_t)wsBytes) {
+                uint8_t payload[2048];
+                size_t payloadLen = 0;
+                size_t consumed = 0;
+                uint8_t opcode = 0;
+                if (!decode_ws_frame(wsBuf + offset, wsBytes - offset, payload, sizeof(payload), &payloadLen, &consumed, &opcode) || consumed == 0) {
+                    break;
+                }
+                offset += consumed;
+
+                // Handle text JSON messages (opcode 0x1)
+                if (opcode == 0x1 && payloadLen > 0) {
+                    payload[payloadLen < sizeof(payload) ? payloadLen : sizeof(payload) - 1] = '\0';
+                    if (strstr((char*)payload, "PEER_CONNECTED") != NULL) {
+                        parse_json_field((char*)payload, "peerWanIp", g_peerWanIp, sizeof(g_peerWanIp));
+                        parse_json_field((char*)payload, "peerLanIp", g_peerLanIp, sizeof(g_peerLanIp));
+                        const char* pPort = strstr((char*)payload, "\"peerPort\":");
+                        if (pPort) g_peerPort = (uint16_t)atoi(pPort + 11);
+
+                        const char* targetIp = (g_peerWanIp[0] != '\0') ? g_peerWanIp : g_peerLanIp;
+                        if (targetIp[0] != '\0') {
+                            g_remoteAddr.sin_family = AF_INET;
+                            g_remoteAddr.sin_port = htons(g_peerPort);
+                            g_remoteAddr.sin_addr.s_addr = inet_addr(targetIp);
+                            g_hasRemoteAddr = true;
                         }
-                        g_lastPacketTime = std::chrono::steady_clock::now();
-                        g_state = NET_STATE_CONNECTED;
+                        send_stun_pings(g_peerWanIp, g_peerLanIp, g_peerPort);
+                    } else if (strstr((char*)payload, "PEER_DISCONNECTED") != NULL) {
+                        g_state = NET_STATE_DISCONNECTED;
+                        g_hasRemoteAddr = false;
+                        g_udpPeerLocked = false;
+                        g_udpIsDirect = false;
+                    }
+                }
+                // Handle binary messages (opcode 0x2)
+                else if (opcode == 0x2 && payloadLen >= sizeof(NetHeader)) {
+                    const NetHeader* hdr = (const NetHeader*)payload;
+                    if (hdr->magic == SMS_NET_MAGIC) {
+                        if (hdr->type == PKT_HEARTBEAT_CRC) {
+                            g_lastPacketTime = std::chrono::steady_clock::now();
+                            g_state = NET_STATE_CONNECTED;
+                        }
+                        else if (hdr->type == PKT_WORLD_STATE && payloadLen >= sizeof(WorldStatePacket)) {
+                            const WorldStatePacket* pkt = (const WorldStatePacket*)payload;
+                            if (!g_hasReceivedWorldState || pkt->state.frame_index >= g_latestWorldState.frame_index) {
+                                g_latestWorldState = pkt->state;
+                                g_hasNewWorldState = true;
+                                g_hasReceivedWorldState = true;
+                            }
+                            g_lastPacketTime = std::chrono::steady_clock::now();
+                            g_state = NET_STATE_CONNECTED;
+                        }
+                        else if (hdr->type == PKT_INPUT_FRAME && payloadLen >= sizeof(NetHeader) + 1) {
+                            const InputBundlePacket* pkt = (const InputBundlePacket*)payload;
+                            int maxCount = (payloadLen - sizeof(NetHeader) - 1) / sizeof(NetPadEntry);
+                            int count = std::min((int)pkt->count, std::min(maxCount, 3));
+                            for (int i = 0; i < count; ++i) {
+                                uint32_t f = pkt->frames[i].frame_index;
+                                int idx = f % RING_BUFFER_SIZE;
+                                g_remoteRing[idx] = pkt->frames[i];
+                                g_remoteRingValid[idx] = true;
+                                if (f > g_remoteLastFrame) {
+                                    g_remoteLastFrame = f;
+                                }
+                            }
+                            g_lastPacketTime = std::chrono::steady_clock::now();
+                            g_state = NET_STATE_CONNECTED;
+                        }
+                        else if (hdr->type == PKT_DISCONNECT) {
+                            g_state = NET_STATE_DISCONNECTED;
+                            g_hasRemoteAddr = false;
+                            g_udpPeerLocked = false;
+                            g_udpIsDirect = false;
+                        }
                     }
                 }
             }
@@ -567,12 +706,19 @@ static void process_incoming_packets() {
 
         // Auto-lock remote peer address on receiving valid network packet
         if (hdr->type == PKT_HEARTBEAT_CRC || hdr->type == PKT_WORLD_STATE || hdr->type == PKT_INPUT_FRAME) {
-            if (g_state == NET_STATE_SEARCHING || g_state == NET_STATE_CONNECTING || !g_hasRemoteAddr) {
+            auto now = std::chrono::steady_clock::now();
+            bool fromRelay = (g_relayIpAddr != 0 && sender.sin_addr.s_addr == g_relayIpAddr && ntohs(sender.sin_port) == 24680);
+            bool directTimedOut = g_udpIsDirect && (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastUdpPacketTime).count() > 1500);
+
+            if (!g_udpPeerLocked || (!fromRelay && !g_udpIsDirect) || (fromRelay && directTimedOut)) {
                 g_remoteAddr = sender;
                 g_hasRemoteAddr = true;
-                g_state = NET_STATE_CONNECTED;
-                g_lastPacketTime = std::chrono::steady_clock::now();
+                g_udpPeerLocked = true;
+                g_udpIsDirect = !fromRelay;
             }
+            g_state = NET_STATE_CONNECTED;
+            g_lastPacketTime = now;
+            g_lastUdpPacketTime = now;
         }
 
         switch (hdr->type) {
@@ -698,9 +844,11 @@ static void process_incoming_packets() {
             case PKT_WORLD_STATE: {
                 if (g_state == NET_STATE_CONNECTED && bytes >= (int)sizeof(WorldStatePacket)) {
                     const WorldStatePacket* pkt = (const WorldStatePacket*)buf;
-                    g_latestWorldState = pkt->state;
-                    g_hasNewWorldState = true;
-                    g_hasReceivedWorldState = true;
+                    if (!g_hasReceivedWorldState || pkt->state.frame_index >= g_latestWorldState.frame_index) {
+                        g_latestWorldState = pkt->state;
+                        g_hasNewWorldState = true;
+                        g_hasReceivedWorldState = true;
+                    }
                     g_lastPacketTime = std::chrono::steady_clock::now();
 
                     static uint32_t s_ballLogCounter = 0;
@@ -746,44 +894,80 @@ void NetPad_ProcessFrame(uint32_t frame_index, const PADStatus* localStatus, PAD
         }
     }
 
-    // Periodic discovery ping if searching
+    // Periodic discovery ping if searching (Cliente) o anunciando (Host)
     if (g_role == NET_ROLE_CLIENT && g_state == NET_STATE_SEARCHING) {
-        static auto lastBroadcast = std::chrono::steady_clock::now();
+        static auto lastBroadcast = std::chrono::steady_clock::now() - std::chrono::seconds(5);
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBroadcast).count() > 1000) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBroadcast).count() > 350) {
             lastBroadcast = now;
             NetHeader ping;
             ping.magic = SMS_NET_MAGIC;
             ping.type = PKT_DISCOVERY_PING;
             ping.role = (uint8_t)NET_ROLE_CLIENT;
             ping.seq = 0;
-
-            sockaddr_in bcAddr;
-            memset(&bcAddr, 0, sizeof(bcAddr));
-            bcAddr.sin_family = AF_INET;
-            bcAddr.sin_port = htons(NET_DEFAULT_PORT);
-            bcAddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-            sendto(g_socket, (const char*)&ping, sizeof(ping), 0,
-                   (struct sockaddr*)&bcAddr, sizeof(bcAddr));
+            send_lan_discovery_sweep(&ping, sizeof(ping), NET_DEFAULT_PORT, false);
+        }
+    } else if (g_role == NET_ROLE_HOST && g_state == NET_STATE_BROADCASTING) {
+        static auto lastHostAnnounce = std::chrono::steady_clock::now() - std::chrono::seconds(5);
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHostAnnounce).count() > 600) {
+            lastHostAnnounce = now;
+            DiscoveryPacket pong;
+            memset(&pong, 0, sizeof(pong));
+            pong.header.magic = SMS_NET_MAGIC;
+            pong.header.type = PKT_DISCOVERY_PONG;
+            pong.header.role = (uint8_t)NET_ROLE_HOST;
+            strncpy(pong.hostname, g_localHostname, sizeof(pong.hostname) - 1);
+            pong.game_port = NET_DEFAULT_PORT;
+            send_lan_discovery_sweep(&pong, sizeof(pong), NET_DEFAULT_PORT, false);
         }
     }
 
     process_incoming_packets();
 
-    // Keep sending handshake pings every 500ms while in "Connecting..."
-    if (g_state == NET_STATE_CONNECTING && (g_peerWanIp[0] != '\0' || g_peerLanIp[0] != '\0' || g_wsSocket != INVALID_SOCKET)) {
+    // Connection timeout check (5 seconds)
+    if (g_state == NET_STATE_CONNECTING) {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastPacketTime).count() > 5000) {
+            NetPad_Disconnect(); // Reset state on timeout
+            if (outRemoteStatus) {
+                memset(outRemoteStatus, 0, sizeof(PADStatus));
+                outRemoteStatus->err = PAD_ERR_NO_CONTROLLER;
+            }
+            return;
+        }
+    }
+
+    // Reenviar petición de conexión en LAN o pings STUN en WAN cada 400ms mientras conecta
+    if (g_state == NET_STATE_CONNECTING || (g_state == NET_STATE_CONNECTED && !g_udpPeerLocked)) {
         static auto lastStunTime = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStunTime).count() > 500) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStunTime).count() > 400) {
             lastStunTime = now;
-            send_stun_pings(g_peerWanIp, g_peerLanIp, g_peerPort);
+            if (g_peerWanIp[0] != '\0' || g_peerLanIp[0] != '\0' || g_wsSocket != INVALID_SOCKET) {
+                send_stun_pings(g_peerWanIp, g_peerLanIp, g_peerPort);
+            } else if (g_role == NET_ROLE_CLIENT && g_state == NET_STATE_CONNECTING && g_hasRemoteAddr) {
+                NetHeader req;
+                req.magic = SMS_NET_MAGIC;
+                req.type = PKT_CONNECT_REQ;
+                req.role = (uint8_t)NET_ROLE_CLIENT;
+                req.seq = 0;
+                sendto(g_socket, (const char*)&req, sizeof(req), 0,
+                       (struct sockaddr*)&g_remoteAddr, sizeof(g_remoteAddr));
+            }
         }
     }
 
     if (g_state != NET_STATE_CONNECTED || (!g_hasRemoteAddr && g_wsSocket == INVALID_SOCKET)) {
         if (outRemoteStatus) {
-            memset(outRemoteStatus, 0, sizeof(PADStatus));
-            outRemoteStatus->err = PAD_ERR_NO_CONTROLLER;
+            // Mientras el Cliente no haya entrado a la partida (sigue en menús eligiendo sala),
+            // conservar su input local para que el Puerto 0 no quede muerto.
+            if (g_role == NET_ROLE_CLIENT && localStatus != nullptr) {
+                *outRemoteStatus = *localStatus;
+            } else {
+                memset(outRemoteStatus, 0, sizeof(PADStatus));
+                outRemoteStatus->err = PAD_ERR_NO_CONTROLLER;
+            }
         }
         return;
     }
@@ -811,7 +995,13 @@ void NetPad_ProcessFrame(uint32_t frame_index, const PADStatus* localStatus, PAD
         sendto(g_socket, (const char*)&pkt, sizeof(pkt), 0,
                (struct sockaddr*)&g_remoteAddr, sizeof(g_remoteAddr));
     }
-    send_ws_binary(&pkt, sizeof(pkt));
+
+    // 2.5 Only send through WS if UDP hasn't locked yet or timed out
+    auto now = std::chrono::steady_clock::now();
+    bool udpHealthy = g_udpPeerLocked && (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastUdpPacketTime).count() < 800);
+    if (!udpHealthy) {
+        send_ws_binary(&pkt, sizeof(pkt));
+    }
 
     // 3. Retrieve remote input for the target execution frame
     uint32_t targetFrame = (frame_index >= g_inputDelay) ? (frame_index - g_inputDelay) : 0;
@@ -839,6 +1029,12 @@ void NetPad_ProcessFrame(uint32_t frame_index, const PADStatus* localStatus, PAD
 }
 
 NetRole NetPad_GetRole(void) {
+    // Mientras el cliente sigue en los menús buscando/seleccionando sala (antes de conectar),
+    // devolver NET_ROLE_HOST para que input.cpp mantenga el mando físico en el Puerto 0 (Jugador 1)
+    // pero siga llamando a NetPad_ProcessFrame() en cada cuadro.
+    if (g_role == NET_ROLE_CLIENT && g_state != NET_STATE_CONNECTED) {
+        return NET_ROLE_HOST;
+    }
     return g_role;
 }
 
@@ -926,7 +1122,12 @@ void NetPad_SendWorldState(const NetWorldState* state) {
         sendto(g_socket, (const char*)&pkt, sizeof(pkt), 0,
                (struct sockaddr*)&g_remoteAddr, sizeof(g_remoteAddr));
     }
-    send_ws_binary(&pkt, sizeof(pkt));
+
+    auto now = std::chrono::steady_clock::now();
+    bool udpHealthy = g_udpPeerLocked && (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastUdpPacketTime).count() < 800);
+    if (!udpHealthy) {
+        send_ws_binary(&pkt, sizeof(pkt));
+    }
 }
 
 bool NetPad_PollWorldState(NetWorldState* outState) {
@@ -969,6 +1170,12 @@ static bool https_get_request(const char* host, const char* path, char* response
         WinHttpCloseHandle(hSession);
         return false;
     }
+
+    DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                    SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
+                    SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                    SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
 
     WinHttpSetTimeouts(hRequest, 4000, 4000, 4000, 4000);
 
@@ -1040,12 +1247,74 @@ static void get_local_ip(char* outIp, size_t maxLen)
     }
 }
 
-bool NetPad_CreateOnlineRoom(char* outRoomCode, size_t maxLen)
+static void send_lan_discovery_sweep(const void* pkt, size_t pktLen, uint16_t targetPort, bool fullSubnetSweep)
+{
+    if (g_socket == INVALID_SOCKET) return;
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(targetPort);
+
+    // 1. Broadcast global 255.255.255.255 y loopback 127.0.0.1
+    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(g_socket, (const char*)pkt, (int)pktLen, 0, (struct sockaddr*)&addr, sizeof(addr));
+
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    sendto(g_socket, (const char*)pkt, (int)pktLen, 0, (struct sockaddr*)&addr, sizeof(addr));
+
+    // 2. Recopilar subredes locales activas
+    std::vector<uint32_t> subnets;
+    char primaryIp[64] = { 0 };
+    get_local_ip(primaryIp, sizeof(primaryIp));
+    if (primaryIp[0] != '\0') {
+        uint32_t ipNet = ntohl(inet_addr(primaryIp)) & 0xFFFFFF00;
+        if (ipNet != 0 && ipNet != 0x7F000000) {
+            subnets.push_back(ipNet);
+        }
+    }
+
+    char hostBuf[128] = { 0 };
+    if (gethostname(hostBuf, sizeof(hostBuf) - 1) == 0) {
+        struct hostent* he = gethostbyname(hostBuf);
+        if (he && he->h_addrtype == AF_INET) {
+            for (int i = 0; he->h_addr_list[i] != nullptr; ++i) {
+                uint32_t ipHostOrder = ntohl(*(uint32_t*)he->h_addr_list[i]);
+                uint32_t ipNet = ipHostOrder & 0xFFFFFF00;
+                uint8_t b0 = (ipHostOrder >> 24) & 0xFF;
+                uint8_t b1 = (ipHostOrder >> 16) & 0xFF;
+                bool isPrivate = (b0 == 192 && b1 == 168) || (b0 == 10) || (b0 == 172 && b1 >= 16 && b1 <= 31);
+                if (isPrivate && std::find(subnets.begin(), subnets.end(), ipNet) == subnets.end()) {
+                    subnets.push_back(ipNet);
+                }
+            }
+        }
+    }
+
+    // 3. Enviar a cada broadcast de subred (X.Y.Z.255) y barrido unicast /24 para abrir Firewall de Windows
+    for (uint32_t subnet : subnets) {
+        addr.sin_addr.s_addr = htonl(subnet | 0xFF);
+        sendto(g_socket, (const char*)pkt, (int)pktLen, 0, (struct sockaddr*)&addr, sizeof(addr));
+
+        if (fullSubnetSweep) {
+            for (uint32_t host = 1; host < 255; ++host) {
+                addr.sin_addr.s_addr = htonl(subnet | host);
+                sendto(g_socket, (const char*)pkt, (int)pktLen, 0, (struct sockaddr*)&addr, sizeof(addr));
+            }
+        }
+    }
+}
+
+bool NetPad_CreateOnlineRoom(const char* hostName, char* outRoomCode, size_t maxLen)
 {
     std::lock_guard<std::recursive_mutex> lock(g_netMutex);
     g_role = NET_ROLE_HOST;
     g_state = NET_STATE_SEARCHING;
     g_hasRemoteAddr = false;
+    g_onlineRoomCode[0] = '\0';
+    g_peerWanIp[0] = '\0';
+    g_peerLanIp[0] = '\0';
+    reset_session_buffers();
 
     if (g_socket == INVALID_SOCKET) {
         NetPad_Init(NET_DEFAULT_PORT);
@@ -1054,8 +1323,16 @@ bool NetPad_CreateOnlineRoom(char* outRoomCode, size_t maxLen)
     char localIp[64] = { 0 };
     get_local_ip(localIp, sizeof(localIp));
 
+    // Encode hostName to prevent URL issues (basic escaping)
+    char safeHost[64] = { 0 };
+    for (int i = 0, j = 0; hostName && hostName[i] && j < 63; i++) {
+        if (hostName[i] == ' ' || hostName[i] == '&' || hostName[i] == '?') safeHost[j++] = '_';
+        else safeHost[j++] = hostName[i];
+    }
+    if (safeHost[0] == '\0') strcpy(safeHost, "SMS-Host");
+
     char path[256];
-    snprintf(path, sizeof(path), "/api/create_room?localIp=%s&port=%u", localIp, NET_DEFAULT_PORT);
+    snprintf(path, sizeof(path), "/api/create_room?localIp=%s&port=%u&hostName=%s", localIp, NET_DEFAULT_PORT, safeHost);
 
     char resp[1024];
     if (!https_get_request("strikers.aprendizaje-guiado.com", path, resp, sizeof(resp))) {
@@ -1085,7 +1362,49 @@ bool NetPad_CreateOnlineRoom(char* outRoomCode, size_t maxLen)
         send_ws_text(g_wsSocket, bindMsg);
     }
 
+    send_stun_pings(nullptr, nullptr, 0); // Registrar UDP en el reflector anticipadamente
+
     return true;
+}
+
+int NetPad_GetOnlineRooms(NetDiscoveredHost* outHosts, int maxHosts)
+{
+    char resp[8192];
+    if (!https_get_request("strikers.aprendizaje-guiado.com", "/api/list_rooms", resp, sizeof(resp))) {
+        return 0;
+    }
+
+    // Basic JSON array parser for [{"code":"...", "host":"..."}, ...]
+    int count = 0;
+    const char* p = resp;
+    while ((p = strstr(p, "\"code\":\"")) != NULL && count < maxHosts) {
+        p += 8;
+        char codeBuf[16] = { 0 };
+        int i = 0;
+        while (*p && *p != '"' && i < 15) {
+            codeBuf[i++] = *p++;
+        }
+        codeBuf[i] = '\0';
+
+        char hostBuf[32] = "SMS-Host";
+        const char* pHost = strstr(p, "\"host\":\"");
+        if (pHost) {
+            pHost += 8;
+            int j = 0;
+            while (*pHost && *pHost != '"' && j < 31) {
+                hostBuf[j++] = *pHost++;
+            }
+            hostBuf[j] = '\0';
+        }
+
+        strncpy(outHosts[count].ip, codeBuf, sizeof(outHosts[count].ip) - 1); // code -> ip
+        outHosts[count].port = 0;
+        strncpy(outHosts[count].hostname, hostBuf, sizeof(outHosts[count].hostname) - 1);
+        outHosts[count].ping_ms = 0;
+        count++;
+    }
+
+    return count;
 }
 
 static void send_stun_pings(const char* wanIp, const char* lanIp, uint16_t port)
@@ -1109,7 +1428,7 @@ static void send_stun_pings(const char* wanIp, const char* lanIp, uint16_t port)
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = inet_addr(wanIp);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 2; i++) {
             sendto(g_socket, (const char*)&pkt, sizeof(pkt), 0, (struct sockaddr*)&addr, sizeof(addr));
         }
     }
@@ -1120,20 +1439,27 @@ static void send_stun_pings(const char* wanIp, const char* lanIp, uint16_t port)
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = inet_addr(lanIp);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 2; i++) {
             sendto(g_socket, (const char*)&pkt, sizeof(pkt), 0, (struct sockaddr*)&addr, sizeof(addr));
         }
     }
 
-    struct hostent* he = gethostbyname("strikers.aprendizaje-guiado.com");
-    if (he) {
+    // Resolver DNS una sola vez y guardar en g_relayIpAddr
+    if (g_relayIpAddr == 0) {
+        struct hostent* he = gethostbyname("strikers.aprendizaje-guiado.com");
+        if (he && he->h_addr_list[0]) {
+            memcpy(&g_relayIpAddr, he->h_addr_list[0], sizeof(uint32_t));
+        }
+    }
+
+    if (g_relayIpAddr != 0) {
         sockaddr_in relayAddr;
         memset(&relayAddr, 0, sizeof(relayAddr));
         relayAddr.sin_family = AF_INET;
         relayAddr.sin_port = htons(24680);
-        memcpy(&relayAddr.sin_addr, he->h_addr_list[0], he->h_length);
+        relayAddr.sin_addr.s_addr = g_relayIpAddr;
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 2; i++) {
             sendto(g_socket, (const char*)&pkt, sizeof(pkt), 0, (struct sockaddr*)&relayAddr, sizeof(relayAddr));
         }
     }
@@ -1160,7 +1486,23 @@ bool NetPad_PollOnlineRoom(char* outPeerIp, uint16_t* outPeerPort)
     std::lock_guard<std::recursive_mutex> lock(g_netMutex);
     if (g_role != NET_ROLE_HOST || g_onlineRoomCode[0] == '\0') return false;
 
-    if (g_state == NET_STATE_CONNECTED) return true;
+    if (g_state == NET_STATE_CONNECTED && (g_peerWanIp[0] != '\0' || g_peerLanIp[0] != '\0')) {
+        const char* targetIp = (g_peerWanIp[0] != '\0') ? g_peerWanIp : g_peerLanIp;
+        if (outPeerIp) {
+            strncpy(outPeerIp, targetIp, 63);
+            outPeerIp[63] = '\0';
+        }
+        if (outPeerPort) *outPeerPort = g_peerPort;
+        return true;
+    }
+
+    // Rate-limit interno de seguridad (máximo 1 poll cada 1000ms)
+    static auto s_lastPollTime = std::chrono::steady_clock::now() - std::chrono::seconds(5);
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastPollTime).count() < 1000) {
+        return false;
+    }
+    s_lastPollTime = now;
 
     char path[128];
     snprintf(path, sizeof(path), "/api/poll_room?code=%s", g_onlineRoomCode);
@@ -1194,6 +1536,8 @@ bool NetPad_PollOnlineRoom(char* outPeerIp, uint16_t* outPeerPort)
         if (outPeerPort) *outPeerPort = g_peerPort;
 
         g_state = NET_STATE_CONNECTING;
+        // CRÍTICO: Inicializar g_lastPacketTime para que el timeout de 5s en NetPad_ProcessFrame no desconecte al Host
+        g_lastPacketTime = std::chrono::steady_clock::now();
 
         if (g_wsSocket != INVALID_SOCKET) {
             char bindMsg[128];
@@ -1216,6 +1560,9 @@ bool NetPad_JoinOnlineRoom(const char* roomCode)
     g_role = NET_ROLE_CLIENT;
     g_state = NET_STATE_SEARCHING;
     g_hasRemoteAddr = false;
+    g_udpPeerLocked = false;
+    g_udpIsDirect = false;
+    g_hasReceivedWorldState = false;
 
     if (g_socket == INVALID_SOCKET) {
         NetPad_Init(NET_DEFAULT_PORT);
@@ -1253,6 +1600,7 @@ bool NetPad_JoinOnlineRoom(const char* roomCode)
 
         strncpy(g_onlineRoomCode, roomCode, sizeof(g_onlineRoomCode) - 1);
         g_state = NET_STATE_CONNECTING;
+        g_lastPacketTime = std::chrono::steady_clock::now(); // Start connection timeout timer
 
         if (connect_websocket_signaling("strikers.aprendizaje-guiado.com", 80)) {
             char bindMsg[128];

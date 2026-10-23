@@ -32,6 +32,7 @@ extern cBall* g_pBall;
 #include <stdlib.h>
 #include "port/discord.h"
 #include "port/overlay.h"
+#include "port/net_pad.h"
 #include <string.h>
 #include "Game/AnimInventory.h"
 #include "Game/AI/ShotMeter.h"
@@ -1579,12 +1580,21 @@ void cGame::InitGameState(eGameState state)
     // Update the game state
     m_eGameState = state;
 
+    bool isNetClient = NetPad_IsConnected() && (NetPad_GetRole() == NET_ROLE_CLIENT);
+
     // Handle state-specific logic
     switch (state)
     {
     case GS_KICKOFF:
         m_pGameClock->Stop();
-        ResetForKickOff();
+        if (!isNetClient)
+        {
+            ResetForKickOff();
+        }
+        else
+        {
+            g_pEventManager->CreateValidEvent(9, 0x14);
+        }
         break;
 
     case GS_PRE_GAME:
@@ -1614,6 +1624,10 @@ void cGame::InitGameState(eGameState state)
     case GS_GAMEPLAY:
     case GS_OVERTIME:
         m_pGameClock->Start();
+        if (isNetClient)
+        {
+            g_pEventManager->CreateValidEvent(9, 0x14);
+        }
         // Loop through all teams and fielders
         for (int i = 0; i < 2; i++)
         {

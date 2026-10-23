@@ -12,6 +12,7 @@
 #include "NL/nlDebug.h"
 #include "NL/nlMath.h"
 #include "NL/nlMemory.h"
+#include <cmath>
 
 #include "Game/Goalie.h"
 
@@ -22,6 +23,7 @@
 
 #include "Game/FixedUpdateTask.h"
 #include "Game/ParticleUpdateTask.h"
+#include "port/net_pad.h"
 
 #include "Game/Game.h"
 #include "Game/Audio/AudioLoader.h"
@@ -145,10 +147,13 @@ void cBall::ClearOwner()
     m_pOwner = NULL;
     m_pPhysicsBall->EnableCollisions();
 
-    m_v3PrevPosition = m_v3Position;
-    m_pPhysicsBall->GetPosition(&m_v3Position);
-
-    m_pPhysicsBall->GetLinearVelocity(&m_v3Velocity);
+    bool isNetClient = NetPad_IsConnected() && (NetPad_GetRole() == NET_ROLE_CLIENT);
+    if (!isNetClient)
+    {
+        m_v3PrevPosition = m_v3Position;
+        m_pPhysicsBall->GetPosition(&m_v3Position);
+        m_pPhysicsBall->GetLinearVelocity(&m_v3Velocity);
+    }
 
     m_bBallPathChangeCount++;
 }
@@ -813,8 +818,13 @@ static inline float clampAbove(float minVal, float x)
 void cBall::PostPhysicsUpdate(float fDeltaT)
 {
     m_v3PrevPosition = m_v3Position;
-    m_pPhysicsBall->GetPosition(&m_v3Position);
-    m_pPhysicsBall->GetLinearVelocity(&m_v3Velocity);
+
+    bool isNetClient = NetPad_IsConnected() && (NetPad_GetRole() == NET_ROLE_CLIENT);
+    if (!isNetClient)
+    {
+        m_pPhysicsBall->GetPosition(&m_v3Position);
+        m_pPhysicsBall->GetLinearVelocity(&m_v3Velocity);
+    }
 
     if (m_unk_0xA6 && mpDamageTarget != NULL)
     {
@@ -1795,6 +1805,21 @@ void cBall::UpdateOrientation(float fDeltaT)
         {
         case BRM_ANIMATED:
             m_pOwner->GetAnimatedBallOrientation(m_qOrientation);
+            {
+                float lenSq = m_qOrientation.x * m_qOrientation.x + m_qOrientation.y * m_qOrientation.y +
+                              m_qOrientation.z * m_qOrientation.z + m_qOrientation.w * m_qOrientation.w;
+                if (lenSq < 0.0001f || std::isnan(lenSq))
+                {
+                    m_qOrientation.x = 0.0f;
+                    m_qOrientation.y = 0.0f;
+                    m_qOrientation.z = 0.0f;
+                    m_qOrientation.w = 1.0f;
+                }
+                else
+                {
+                    nlQuatNormalize(m_qOrientation, m_qOrientation);
+                }
+            }
             return;
         case BRM_MATCH_VELOCITY:
         {

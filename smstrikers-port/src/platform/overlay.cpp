@@ -1613,6 +1613,11 @@ static void draw_netplay_tab()
     static char s_createdRoomCode[16] = "";
     static int s_port = NET_DEFAULT_PORT;
 
+    static bool s_searchingOnline = false;
+    static NetDiscoveredHost s_cachedOnlineHosts[NET_MAX_DISCOVERED];
+    static int s_cachedOnlineCount = 0;
+    static uint32_t s_listTimer = 0;
+
     NetRole role = NetPad_GetRole();
     NetState state = NetPad_GetState();
 
@@ -1620,18 +1625,28 @@ static void draw_netplay_tab()
     {
         if (ImGui::CollapsingHeader("Online por Internet (WAN - strikers.aprendizaje-guiado.com)", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            ImGui::InputText("Nombre del Jugador", s_hostName, sizeof(s_hostName));
+
             if (ImGui::Button("Crear Sala Online (Host)", ImVec2(220, 32)))
             {
-                if (NetPad_CreateOnlineRoom(s_createdRoomCode, sizeof(s_createdRoomCode)))
+                if (NetPad_CreateOnlineRoom(s_hostName, s_createdRoomCode, sizeof(s_createdRoomCode)))
                 {
                     printf("[OVERLAY] Created online room: %s\n", s_createdRoomCode);
                 }
             }
 
             ImGui::Spacing();
-            ImGui::Text("O unirse con codigo de sala:");
+            if (ImGui::Button("Buscar Salas Activas", ImVec2(220, 32)))
+            {
+                s_searchingOnline = true;
+                s_listTimer = 0;
+                NetPad_StartClient((uint16_t)s_port);
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("O unirse manualmente por codigo:");
             ImGui::InputText("Codigo de Sala", s_onlineRoomCode, sizeof(s_onlineRoomCode));
-            if (ImGui::Button("Unirse a Sala Online", ImVec2(200, 30)))
+            if (ImGui::Button("Unirse a Sala", ImVec2(200, 30)))
             {
                 if (NetPad_JoinOnlineRoom(s_onlineRoomCode))
                 {
@@ -1653,6 +1668,8 @@ static void draw_netplay_tab()
             ImGui::Spacing();
             if (ImGui::Button("Buscar Partidas en Wi-Fi", ImVec2(200, 30)))
             {
+                s_searchingOnline = false;
+                s_cachedOnlineCount = 0;
                 NetPad_StartClient((uint16_t)s_port);
             }
 
@@ -1697,22 +1714,48 @@ static void draw_netplay_tab()
         }
         else
         {
-            ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1.0f), "Conectando al Servidor de Señalizacion...");
+            ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1.0f), "Buscando partidas o conectando...");
+
             NetDiscoveredHost hosts[NET_MAX_DISCOVERED];
             int count = NetPad_GetDiscoveredHosts(hosts, NET_MAX_DISCOVERED);
+
+            if (s_searchingOnline && (s_listTimer++ % 180 == 0))
+            {
+                s_cachedOnlineCount = NetPad_GetOnlineRooms(s_cachedOnlineHosts, NET_MAX_DISCOVERED);
+            }
+
+            for (int i = 0; i < s_cachedOnlineCount && count < NET_MAX_DISCOVERED; ++i)
+            {
+                hosts[count++] = s_cachedOnlineHosts[i];
+            }
+
             if (count > 0)
             {
                 for (int i = 0; i < count; ++i)
                 {
-                    ImGui::BulletText("%s (%s:%d)", hosts[i].hostname, hosts[i].ip, hosts[i].port);
-                    ImGui::SameLine();
-                    char btnLabel[64];
-                    snprintf(btnLabel, sizeof(btnLabel), "Unirse##%d", i);
-                    if (ImGui::Button(btnLabel))
-                    {
-                        NetPad_ConnectTo(hosts[i].ip, hosts[i].port);
+                    // For online rooms, we stored the room code in the `ip` field and port = 0
+                    if (hosts[i].port == 0) {
+                        ImGui::BulletText("Online: %s (Sala: %s)", hosts[i].hostname, hosts[i].ip);
+                        ImGui::SameLine();
+                        char btnLabel[64];
+                        snprintf(btnLabel, sizeof(btnLabel), "Unirse##%d", i);
+                        if (ImGui::Button(btnLabel))
+                        {
+                            NetPad_JoinOnlineRoom(hosts[i].ip);
+                        }
+                    } else {
+                        ImGui::BulletText("LAN: %s (%s:%d)", hosts[i].hostname, hosts[i].ip, hosts[i].port);
+                        ImGui::SameLine();
+                        char btnLabel[64];
+                        snprintf(btnLabel, sizeof(btnLabel), "Unirse##LAN%d", i);
+                        if (ImGui::Button(btnLabel))
+                        {
+                            NetPad_ConnectTo(hosts[i].ip, hosts[i].port);
+                        }
                     }
                 }
+            } else {
+                ImGui::TextDisabled("No se detectan salas activas...");
             }
         }
 

@@ -8,6 +8,7 @@
 #include "Game/FE/tlTextInstance.h"
 #include "Game/FE/tlImageInstance.h"
 #include "Game/FE/feText.h"
+#include "port/net_pad.h"
 #include "NL/nlAlgorithm.h"
 #include "NL/nlConfig.h"
 #include "NL/nlLexicalCast.h"
@@ -265,6 +266,8 @@ void FEPopupMenu::SceneCreated()
  */
 void FEPopupMenu::Update(float fDeltaT)
 {
+    NetMenu_Tick();
+
     if (!mMenuCreated)
     {
         return;

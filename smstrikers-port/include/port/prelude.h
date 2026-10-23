@@ -49,6 +49,17 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#if defined(__MINGW32__)
+#include <stdlib.h>
+#include <malloc.h>
+#ifndef __mingw_aligned_malloc
+#define __mingw_aligned_malloc _aligned_malloc
+#endif
+#ifndef __mingw_aligned_free
+#define __mingw_aligned_free _aligned_free
+#endif
+#endif
+
 
 // MSL declares va_list as `typedef __va_list_struct __va_list[1]`, and headers in the tree spell
 // the underlying name directly.

@@ -45,6 +45,58 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "windows-x86_64",
+      "displayName": "Windows x86-64 MinGW (Native PC)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows-x86_64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchain-x86_64-w64-mingw32.cmake",
+        "STRIKERS_AURORA": {
+          "type": "BOOL",
+          "value": true
+        },
+        "STRIKERS_FFMPEG": {
+          "type": "BOOL",
+          "value": false
+        },
+        "STRIKERS_DISCORD": {
+          "type": "BOOL",
+          "value": false
+        },
+        "AURORA_SDL3_PROVIDER": "package",
+        "AURORA_NOD_PROVIDER": "package"
+      }
+    },
+    {
+      "name": "android-arm64-v8a",
+      "displayName": "Android arm64-v8a GLES",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/android-arm64-v8a",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "/mnt/c/Users/migue/AppData/Local/Android/Sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-24",
+        "ANDROID_STL": "c++_shared",
+        "STRIKERS_AURORA": {
+          "type": "BOOL",
+          "value": true
+        },
+        "STRIKERS_FFMPEG": {
+          "type": "BOOL",
+          "value": false
+        },
+        "STRIKERS_DISCORD": {
+          "type": "BOOL",
+          "value": false
+        },
+        "AURORA_SDL3_PROVIDER": "vendor",
+        "AURORA_SDL3_LINKAGE": "static",
+        "AURORA_NOD_PROVIDER": "vendor"
+      }
     }
   ],
   "buildPresets": [
@@ -58,6 +110,18 @@
       "name": "linux-aarch64-gles-debug",
       "configurePreset": "linux-aarch64-gles-debug",
       "displayName": "Linux aarch64 GLES Debug (RK3326)",
+      "targets": ["strikers"]
+    },
+    {
+      "name": "windows-x86_64",
+      "configurePreset": "windows-x86_64",
+      "displayName": "Windows x86-64 MinGW (Native PC)",
+      "targets": ["strikers"]
+    },
+    {
+      "name": "android-arm64-v8a",
+      "configurePreset": "android-arm64-v8a",
+      "displayName": "Android arm64-v8a GLES",
       "targets": ["strikers"]
     }
   ]

@@ -2,7 +2,14 @@
 
 #include "../internal.hpp"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 
 namespace aurora::gl {
 namespace {
@@ -18,13 +25,21 @@ EglGetProcAddressFn g_eglGetProcAddress = nullptr;
 void* dlsym_lib(void*& handle, const char* const* names, const char* sym) {
   if (handle == nullptr) {
     for (const char* const* n = names; *n != nullptr; ++n) {
+#ifdef _WIN32
+      handle = reinterpret_cast<void*>(LoadLibraryA(*n));
+#else
       handle = dlopen(*n, RTLD_NOW | RTLD_GLOBAL);
+#endif
       if (handle != nullptr) {
         break;
       }
     }
   }
+#ifdef _WIN32
+  return handle != nullptr ? reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(handle), sym)) : nullptr;
+#else
   return handle != nullptr ? dlsym(handle, sym) : nullptr;
+#endif
 }
 } // namespace
 
@@ -37,7 +52,11 @@ void* resolve(ProcAddressFn getProc, const char* name) {
       return p;
     }
   }
+#ifdef _WIN32
+  static const char* const kEgl[] = {"libEGL.dll", "libEGL_angle.dll", nullptr};
+#else
   static const char* const kEgl[] = {"libEGL.so.1", "libEGL.so", "libmali.so", "libMali.so", nullptr};
+#endif
   if (g_eglGetProcAddress == nullptr) {
     g_eglGetProcAddress = reinterpret_cast<EglGetProcAddressFn>(dlsym_lib(g_libEGL, kEgl, "eglGetProcAddress"));
   }
@@ -46,7 +65,11 @@ void* resolve(ProcAddressFn getProc, const char* name) {
       return p;
     }
   }
+#ifdef _WIN32
+  static const char* const kGles[] = {"libGLESv2.dll", "libGLESv2_angle.dll", nullptr};
+#else
   static const char* const kGles[] = {"libGLESv2.so", "libGLESv2.so.2", nullptr};
+#endif
   if (void* p = dlsym_lib(g_libGLESv2, kGles, name)) {
     return p;
   }

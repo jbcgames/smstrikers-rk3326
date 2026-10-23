@@ -235,6 +235,8 @@ void CharacterTriggerHandler(uintptr_t uParam)
 
     AnimTriggerCallbackInfo* pInfo = (AnimTriggerCallbackInfo*)uParam;
     cCharacter* pCharacter = g_pCurrentlyUpdatingCharacter;
+    if (pCharacter == NULL)
+        return;
     switch (pInfo->m_uEventID)
     {
     case 0x002EF345:

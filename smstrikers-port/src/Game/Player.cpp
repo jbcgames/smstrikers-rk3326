@@ -990,12 +990,21 @@ cGlobalPad* cPlayer::GetGlobalPad()
  */
 void cPlayer::ReleaseBall()
 {
-    m_pPhysicsCharacter->ReleaseObject();
-    m_pBall->ClearOwner();
-    m_pBall = NULL;
+    if (m_pPhysicsCharacter != NULL)
+    {
+        m_pPhysicsCharacter->ReleaseObject();
+    }
+    if (m_pBall != NULL)
+    {
+        m_pBall->ClearOwner();
+        m_pBall = NULL;
+    }
 
     float fPossessionTime = m_tBallPossessionTimer.GetSeconds();
-    StatsTracker::Instance()->TrackStat(STATS_POSSESION_TIME, m_pTeam->m_nSide, m_ID, 100.0f * fPossessionTime, 0, 0, 0);
+    if (m_pTeam != NULL && StatsTracker::Instance() != NULL)
+    {
+        StatsTracker::Instance()->TrackStat(STATS_POSSESION_TIME, m_pTeam->m_nSide, m_ID, 100.0f * fPossessionTime, 0, 0, 0);
+    }
 
     if (IsPlayingEffect(fxGetGroup("ball_sts_windup")))
     {
@@ -1005,7 +1014,10 @@ void cPlayer::ReleaseBall()
 
     KillWindups(this);
     StopSFX(Audio::CHARSFX_KICK_ATTEMPT);
-    m_pCharacterSFX->StopMovementLoop();
+    if (m_pCharacterSFX != NULL)
+    {
+        m_pCharacterSFX->StopMovementLoop();
+    }
 }
 
 /**

@@ -962,3 +962,12 @@ int main(int argc, char* argv[])
     }
 #endif
 }
+
+#if defined(_WIN32)
+extern "C" int __stdcall WinMain(void* hInstance, void* hPrevInstance, char* lpCmdLine, int nShowCmd)
+{
+    extern int __argc;
+    extern char** __argv;
+    return main(__argc, __argv);
+}
+#endif
