@@ -1058,10 +1058,14 @@ GlslProgram emit_glsl(const ShaderConfig& config, const ShaderInfo& info) {
       vsBody += fmt::format("\n    vec4 tc{} = vec4({}, 1.0);", i, vtx_attr(config, GX_VA_POS));
     } else if (tcg.src == GX_TG_NRM) {
       vsBody += fmt::format("\n    vec4 tc{} = vec4({}, 1.0);", i, vtx_attr(config, GX_VA_NRM));
-    } else if (tcg.src == GX_TG_COLOR0) {
-      vsBody += fmt::format("\n    vec4 tc{} = {};", i, vtx_attr(config, GX_VA_CLR0));
-    } else if (tcg.src == GX_TG_COLOR1) {
-      vsBody += fmt::format("\n    vec4 tc{} = {};", i, vtx_attr(config, GX_VA_CLR1));
+    } else if (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1) {
+      // smstrikers-port: a colour-source texgen reads the lit channel, not the vertex colour.
+      const u32 ch = tcg.src == GX_TG_COLOR0 ? 0 : 1;
+      if (info.sampledColorChannels.test(ch)) {
+        vsBody += fmt::format("\n    vec4 tc{} = v_cc{};", i, ch);
+      } else {
+        vsBody += fmt::format("\n    vec4 tc{} = {};", i, vtx_attr(config, static_cast<GXAttr>(GX_VA_CLR0 + ch)));
+      }
     } else if (tcg.src == GX_TG_BINRM) {
       vsBody += fmt::format("\n    vec4 tc{} = vec4({}, 1.0);", i, nbt_slice_local(NbtSlice::B));
     } else if (tcg.src == GX_TG_TANGENT) {
