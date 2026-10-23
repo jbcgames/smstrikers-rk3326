@@ -4,6 +4,7 @@
 #include "NL/nlBind.h"
 #include "NL/nlFunction.h"
 #include "Game/main.h"
+#include "dolphin/dvd.h"
 
 #if defined(PORT_USE_AURORA)
 #include <aurora/aurora.h>
@@ -185,6 +186,8 @@ static void PreInitFS()
 {
 }
 
+extern "C" void DVDCheckDataOrFatal(void);
+
 /**
  * Offset/Address/Size: 0x354 | 0x80173864 | size: 0x1858
  */
@@ -196,6 +199,7 @@ static void Initialize()
         Bind<void>(MemFun<ResetTask, void>(&ResetTask::FSCheckForReset), &resetTask)));
 
     nlInit();
+    DVDCheckDataOrFatal();
     bool glStartupSuccessful = glStartup();
     if (!glStartupSuccessful)
     {
@@ -719,6 +723,10 @@ int main(int argc, char* argv[])
         wantBackend = BACKEND_VULKAN;
         cfg.desiredBackend = wantBackend;
         int backendWasAsked = 0;
+#elif defined(__ANDROID__)
+        wantBackend = BACKEND_OPENGLES;
+        cfg.desiredBackend = wantBackend;
+        int backendWasAsked = 0;
 #else
         int backendWasAsked = 0;
 #endif
@@ -961,6 +969,11 @@ int main(int argc, char* argv[])
         UpdateProfile();
     }
 #endif
+}
+
+extern "C" int SDL_main(int argc, char* argv[])
+{
+    return aurora_main(argc, argv);
 }
 
 #if defined(_WIN32)

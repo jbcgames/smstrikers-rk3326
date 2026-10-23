@@ -186,6 +186,7 @@ BOOL DVDCheckDisk(void);
 int DVDSetAutoFatalMessaging(BOOL enable);
 
 // DVD FS
+void DVDCheckDataOrFatal(void);
 s32 DVDConvertPathToEntrynum(const char* pathPtr);
 BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo);
 BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo);

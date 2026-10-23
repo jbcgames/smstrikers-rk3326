@@ -169,6 +169,9 @@ int port_setenv_default(const char* name, const char* value)
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+#if defined(PORT_USE_AURORA)
+#include <SDL3/SDL_filesystem.h>
+#endif
 
 unsigned long long port_monotonic_ns(void)
 {
@@ -240,7 +243,23 @@ int port_executable_dir(char* buf, size_t size)
     // No portable answer here, and the two spellings share nothing: Darwin hands back a path that
     // may be relative or contain symlinks and must be resolved, Linux exposes the resolved path as
     // a symlink in /proc.
-#if defined(__APPLE__)
+#if defined(__ANDROID__)
+    const char* base = SDL_GetBasePath();
+    if (base && strlen(base) < size)
+    {
+        strncpy(buf, base, size - 1);
+        buf[size - 1] = '\0';
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '/' || buf[len - 1] == '\\'))
+        {
+            buf[--len] = '\0';
+        }
+        return 0;
+    }
+    strncpy(buf, "/sdcard/strikers", size - 1);
+    buf[size - 1] = '\0';
+    return 0;
+#elif defined(__APPLE__)
     char raw[4096];
     uint32_t rawSize = (uint32_t)sizeof raw;
     if (_NSGetExecutablePath(raw, &rawSize) != 0)

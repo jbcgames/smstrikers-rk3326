@@ -509,6 +509,19 @@ void present_frame(uint32_t targetFbo) noexcept {
     const auto dstY1 = dstY0 + static_cast<gl::GLint>(viewport.height);
     gl::gl.BlitFramebuffer(0, 0, static_cast<gl::GLint>(source.size.width), static_cast<gl::GLint>(source.size.height),
                            dstX0, dstY0, dstX1, dstY1, gl::GL_COLOR_BUFFER_BIT, gl::GL_LINEAR);
+    if (gl::gl.GetError() != gl::GL_NO_ERROR) {
+      const gl::GLuint program = present_ui_program();
+      if (program != 0) {
+        gl::gl.BindFramebuffer(gl::GL_FRAMEBUFFER, targetFbo);
+        gl::gl.Viewport(dstX0, dstY0, static_cast<gl::GLsizei>(viewport.width), static_cast<gl::GLsizei>(viewport.height));
+        gl::gl.Disable(gl::GL_BLEND);
+        gl::gl.UseProgram(program);
+        gl::gl.ActiveTexture(gl::GL_TEXTURE0);
+        gl::gl.BindTexture(gl::GL_TEXTURE_2D, source.texture.id);
+        gl::gl.BindVertexArray(0);
+        gl::gl.DrawArrays(gl::GL_TRIANGLES, 0, 3);
+      }
+    }
     gl::gl.BindFramebuffer(gl::GL_FRAMEBUFFER, targetFbo);
   }
 }

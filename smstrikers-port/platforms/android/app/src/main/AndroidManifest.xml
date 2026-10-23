@@ -28,6 +28,7 @@
 
         <activity
             android:name="com.jbcgames.strikers.StrikersActivity"
+            android:screenOrientation="sensorLandscape"
             android:alwaysRetainTaskState="true"
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:exported="true"

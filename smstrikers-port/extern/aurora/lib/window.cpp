@@ -49,11 +49,7 @@ bool g_frameBufferAspectFit = false;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
-#if defined(SDL_PLATFORM_ANDROID)
-std::atomic_bool g_surfaceReady = false;
-#else
 std::atomic_bool g_surfaceReady = true;
-#endif
 bool g_lastPaused = false;
 bool g_gotFocus = false;
 
@@ -261,16 +257,20 @@ void process_event(SDL_Event& event) {
     }
     break;
   case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+#if !defined(SDL_PLATFORM_ANDROID)
     if (primaryWindow) {
       g_events.push_back(AuroraEvent{
           .type = AURORA_EXIT,
       });
     }
+#endif
     break;
   case SDL_EVENT_QUIT:
+#if !defined(SDL_PLATFORM_ANDROID)
     g_events.push_back(AuroraEvent{
         .type = AURORA_EXIT,
     });
+#endif
     break;
   default:
     if (event.type == g_sdlCustomEventsStart + CustomEvent::FutureResize) {
@@ -363,7 +363,7 @@ bool create_window(AuroraBackend backend) {
   if (!sdl2ShimDriver) {
     flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
   }
-#if TARGET_OS_IOS || TARGET_OS_TV
+#if TARGET_OS_IOS || TARGET_OS_TV || defined(__ANDROID__)
   flags |= SDL_WINDOW_FULLSCREEN;
 #else
   flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
@@ -687,6 +687,10 @@ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACK
 #if defined(SDL_PLATFORM_ANDROID)
 extern "C" JNIEXPORT void JNICALL Java_dev_encounter_aurora_AuroraSurface_nativeSetSurfaceReady(JNIEnv*, jclass,
                                                                                                 jboolean ready) {
+  aurora::window::set_surface_ready(ready == JNI_TRUE);
+}
+extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_nativeSetSurfaceReady(JNIEnv*, jclass,
+                                                                                        jboolean ready) {
   aurora::window::set_surface_ready(ready == JNI_TRUE);
 }
 #endif

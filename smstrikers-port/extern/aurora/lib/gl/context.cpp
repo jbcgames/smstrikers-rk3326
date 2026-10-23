@@ -57,6 +57,7 @@ bool create_desktop(const ContextConfig& cfg) {
 
   // A second context sharing objects with the render context, for the compiler
   // thread. SDL makes a freshly created context current, so restore render after.
+#if !defined(SDL_PLATFORM_ANDROID)
   SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
   g_shareCtx = SDL_GL_CreateContext(g_window);
   if (g_shareCtx == nullptr) {
@@ -64,6 +65,7 @@ bool create_desktop(const ContextConfig& cfg) {
     Log.warn("[gl] SDL_GL_CreateContext (share) failed: {}; compiler thread disabled", SDL_GetError());
   }
   SDL_GL_MakeCurrent(g_window, g_renderCtx);
+#endif
 
   if (!load(desktop_get_proc)) {
     return false;

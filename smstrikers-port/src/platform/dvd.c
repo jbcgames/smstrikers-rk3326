@@ -229,14 +229,13 @@ static void pick_image(void* user, const char* name)
 #define DVD_SENTINEL "common.ini"
 
 // The paths tried, in the order tried, so the message can name them.
-#define DVD_MAX_TRIED 4
+#define DVD_MAX_TRIED 8
+static char s_tried[DVD_MAX_TRIED][1024];
+static const char* s_triedWhy[DVD_MAX_TRIED];
+static int s_nTried = 0;
 
 void DVDInit(void)
 {
-    char tried[DVD_MAX_TRIED][1024];
-    const char* triedWhy[DVD_MAX_TRIED];
-    int nTried = 0;
-
     if (s_count)
         return;
 
@@ -249,8 +248,10 @@ void DVDInit(void)
     if (env != NULL && *env != '\0')
     {
         snprintf(s_root, sizeof s_root, "%s", env);
-        snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
-        triedWhy[nTried++] = why;
+        if (s_nTried < DVD_MAX_TRIED) {
+            snprintf(s_tried[s_nTried], sizeof s_tried[0], "%s", s_root);
+            s_triedWhy[s_nTried++] = why;
+        }
         if (is_regular_file(s_root))
             open_image(s_root);   // never returns if it is not a usable image
         else
@@ -265,8 +266,10 @@ void DVDInit(void)
         if (port_executable_dir(dir, sizeof dir) == 0)
         {
             snprintf(s_root, sizeof s_root, "%s/files", dir);
-            snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
-            triedWhy[nTried++] = "beside the game";
+            if (s_nTried < DVD_MAX_TRIED) {
+                snprintf(s_tried[s_nTried], sizeof s_tried[0], "%s", s_root);
+                s_triedWhy[s_nTried++] = "beside the game";
+            }
             scan(s_root, "");
         }
     }
@@ -285,8 +288,10 @@ void DVDInit(void)
             if (ctx.best[0] != '\0')
             {
                 snprintf(s_root, sizeof s_root, "%s/%s", dir, ctx.best);
-                snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
-                triedWhy[nTried++] = "a disc image beside the game";
+                if (s_nTried < DVD_MAX_TRIED) {
+                    snprintf(s_tried[s_nTried], sizeof s_tried[0], "%s", s_root);
+                    s_triedWhy[s_nTried++] = "a disc image beside the game";
+                }
                 open_image(s_root);
             }
         }
@@ -300,9 +305,58 @@ void DVDInit(void)
         // checkout gets by default.
         snprintf(s_root, sizeof s_root, "%s",
                  "data/G4QE01/files");
-        snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
-        triedWhy[nTried++] = "a source checkout";
+        if (s_nTried < DVD_MAX_TRIED) {
+            snprintf(s_tried[s_nTried], sizeof s_tried[0], "%s", s_root);
+            s_triedWhy[s_nTried++] = "a source checkout";
+        }
         scan(s_root, "");
+    }
+
+#if defined(__ANDROID__)
+    if (s_count == 0)
+    {
+        static const char* const kAndroidSearchPaths[] = {
+            "/sdcard/strikers/files",
+            "/sdcard/strikers",
+            "/sdcard/Download/strikers/files",
+            "/sdcard/Download/strikers",
+            "/sdcard/Download",
+            "/storage/emulated/0/strikers/files",
+            "/storage/emulated/0/strikers",
+            "/storage/emulated/0/Download"
+        };
+        for (size_t i = 0; s_count == 0 && i < sizeof(kAndroidSearchPaths)/sizeof(kAndroidSearchPaths[0]); ++i)
+        {
+            if (s_nTried < DVD_MAX_TRIED) {
+                snprintf(s_tried[s_nTried], sizeof s_tried[0], "%s", kAndroidSearchPaths[i]);
+                s_triedWhy[s_nTried++] = "Android storage location";
+            }
+            if (is_regular_file(kAndroidSearchPaths[i]))
+            {
+                open_image(kAndroidSearchPaths[i]);
+            }
+            else
+            {
+                scan(kAndroidSearchPaths[i], "");
+                if (s_count == 0) {
+                    struct PickCtx ctx;
+                    ctx.dir = kAndroidSearchPaths[i];
+                    ctx.best[0] = '\0';
+                    port_scan_dir(kAndroidSearchPaths[i], pick_image, &ctx);
+                    if (ctx.best[0] != '\0') {
+                        snprintf(s_root, sizeof s_root, "%s/%s", kAndroidSearchPaths[i], ctx.best);
+                        open_image(s_root);
+                    }
+                }
+            }
+        }
+    }
+#endif
+
+    if (s_count == 0)
+    {
+        fprintf(stderr, "[port] DVDInit: initial scan complete, no files found yet\n");
+        return;
     }
 
     if (s_disc != NULL)
@@ -310,37 +364,6 @@ void DVDInit(void)
                 s_root, port_disc_format(s_disc));
     else
         fprintf(stderr, "[port] DVD: %d files under %s\n", s_count, s_root);
-
-    // PORT: fatal rather than zero files and a printed warning; launched from a file manager there
-    // is no console to read.
-    if (s_count == 0)
-    {
-        char msg[4096];
-        int n = 0;
-        int i;
-        n += snprintf(msg + n, sizeof msg - (size_t)n,
-                      "The game data was not found.\n\n"
-                      "Super Mario Strikers needs its own GameCube disc: "
-                      "either a disc image\n(.iso, .gcm, .ciso or .gcz) or the "
-                      "`files` folder of an extracted one\n(1416 files, about "
-                      "618 MB). No game data is shipped with this port; "
-                      "supply\nyour own copy.\n\n"
-                      "Looked in, in order:\n");
-        for (i = 0; i < nTried && n < (int)sizeof msg; i++)
-            n += snprintf(msg + n, sizeof msg - (size_t)n,
-                          "  %d. %s\n     (%s)\n", i + 1, tried[i], triedWhy[i]);
-        if (n < (int)sizeof msg)
-            snprintf(msg + n, sizeof msg - (size_t)n,
-                     "\nTo fix this, either:\n"
-                     "  * choose it on the Game tab of the settings app beside "
-                     "the game, or\n"
-                     "  * put your disc image, or the extracted disc's `files` "
-                     "folder, next to the\n    game, or\n"
-                     "  * set the `data` key in strikers.ini (beside the game) "
-                     "to either of those, or\n"
-                     "  * set the STRIKERS_DATA environment variable to it.\n");
-        port_fatal("Super Mario Strikers: game data not found", msg);
-    }
 
     // Files, but not this game's files. A folder of holiday photos scans perfectly well and then
     // dies a long way from here, in the DVD layer or an allocator, on a header that was never a
@@ -393,6 +416,36 @@ void DVDInit(void)
                  s_disc != NULL ? "in this image" : "beside this data",
                  s_root, found);
         port_fatal("Super Mario Strikers: wrong disc", msg);
+    }
+}
+
+void DVDCheckDataOrFatal(void)
+{
+    if (s_count == 0)
+    {
+        DVDInit();
+    }
+    if (s_count == 0)
+    {
+        char msg[4096];
+        int n = 0;
+        int i;
+        n += snprintf(msg + n, sizeof msg - (size_t)n,
+                      "The game data was not found.\n\n"
+                      "Super Mario Strikers needs its own GameCube disc: "
+                      "either a disc image\n(.iso, .gcm, .ciso or .gcz) or the "
+                      "`files` folder of an extracted one\n(1416 files, about "
+                      "618 MB). No game data is shipped with this port; "
+                      "supply\nyour own copy.\n\n"
+                      "Looked in, in order:\n");
+        for (i = 0; i < s_nTried && n < (int)sizeof msg; i++)
+            n += snprintf(msg + n, sizeof msg - (size_t)n,
+                          "  %d. %s\n     (%s)\n", i + 1, s_tried[i], s_triedWhy[i]);
+        if (n < (int)sizeof msg)
+            snprintf(msg + n, sizeof msg - (size_t)n,
+                     "\nTo fix this, put your disc image (.iso) or extracted `files` folder in:\n"
+                     "  /sdcard/strikers/\n");
+        port_fatal("Super Mario Strikers: game data not found", msg);
     }
 }
 

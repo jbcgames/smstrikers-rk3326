@@ -22,6 +22,7 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame) { (void)frame; }
 #include <SDL3/SDL_joystick.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_mouse.h>
 
 #include "dolphin/os.h"
 #include "dolphin/pad.h"
@@ -1152,6 +1153,15 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame)
     }
     held |= fake_key_state(frame, &lx, &ly, &rx, &ry, &tl, &tr);
 
+#if defined(__ANDROID__)
+    // Touchscreen / mouse tap support for Android
+    float mx = 0, my = 0;
+    SDL_MouseButtonFlags mflags = SDL_GetMouseState(&mx, &my);
+    if ((mflags & SDL_BUTTON_LMASK) != 0)
+    {
+        held |= PAD_BUTTON_A;
+    }
+#else
     // The debug menu detaches the keyboard, so a neutral virtual pad keeps port 0 connected.
     const bool menuHasKeyboard = PortOverlayMenuOpen() && PortInputKeyboardEnabled();
     if (held == 0 && lx == 0 && ly == 0 && rx == 0 && ry == 0 && tl == 0 && tr == 0 &&
@@ -1160,6 +1170,7 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame)
         PADClearVirtualStatus(0);
         return;
     }
+#endif
 
     PADStatus status;
     std::memset(&status, 0, sizeof status);
