@@ -28,16 +28,17 @@ static Module Log("aurora::gx::fifo");
 // array content hashes the native geometry cache keys indexed draws by.
 static u32 s_gxArrayInvalidateGen = 0;
 
-static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
-  u16 numIndices = 0;
+// smstrikers-port: u32, since a u16 vertex count can need more than 65,535 indices.
+static u32 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
+  u32 numIndices = 0;
   if (prim == GX_QUADS) {
     buf.reserve_extra((vtxCount / 4) * 6 * sizeof(u16));
 
-    for (u16 v = 0; v < vtxCount; v += 4) {
-      u16 idx0 = vtxStart + v;
-      u16 idx1 = vtxStart + v + 1;
-      u16 idx2 = vtxStart + v + 2;
-      u16 idx3 = vtxStart + v + 3;
+    for (u32 v = 0; v + 4 <= vtxCount; v += 4) {
+      const u16 idx0 = static_cast<u16>(vtxStart + v);
+      const u16 idx1 = static_cast<u16>(idx0 + 1);
+      const u16 idx2 = static_cast<u16>(idx0 + 2);
+      const u16 idx3 = static_cast<u16>(idx0 + 3);
 
       buf.append(idx0);
       buf.append(idx1);
@@ -57,7 +58,7 @@ static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u
       ++numIndices;
     }
   } else if (prim == GX_TRIANGLEFAN) {
-    buf.reserve_extra(((u32(vtxCount) - 3) * 3 + 3) * sizeof(u16));
+    buf.reserve_extra((vtxCount < 3 ? vtxCount : (u32(vtxCount) - 2) * 3) * sizeof(u16));
     for (u16 v = 0; v < vtxCount; ++v) {
       const u16 idx = vtxStart + v;
       if (v < 3) {
@@ -69,7 +70,7 @@ static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u
       numIndices += 3;
     }
   } else if (prim == GX_TRIANGLESTRIP) {
-    buf.reserve_extra(((static_cast<u32>(vtxCount) - 3) * 3 + 3) * sizeof(u16));
+    buf.reserve_extra((vtxCount < 3 ? vtxCount : (u32(vtxCount) - 2) * 3) * sizeof(u16));
     for (u16 v = 0; v < vtxCount; ++v) {
       const u16 idx = vtxStart + v;
       if (v < 3) {
@@ -102,8 +103,8 @@ static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u
 // topology), rather than unrolling it into an independent triangle list. `restart`
 // prepends a 0xffff primitive-restart index so an earlier strip in the same index
 // buffer ends before this one begins. Returns the index count written (incl. restart).
-static u16 build_triangle_strip_topology_indices(ByteBuffer& buf, u16 vtxStart, u16 vtxCount, bool restart) {
-  const u16 numIndices = static_cast<u16>(vtxCount + (restart ? 1 : 0));
+static u32 build_triangle_strip_topology_indices(ByteBuffer& buf, u16 vtxStart, u16 vtxCount, bool restart) {
+  const u32 numIndices = u32(vtxCount) + (restart ? 1 : 0);
   buf.reserve_extra(static_cast<size_t>(numIndices) * sizeof(u16));
   if (restart) {
     buf.append<u16>(0xffff);
@@ -1630,8 +1631,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
 
   auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
   // A storage draw must never merge into a native draw's range (incompatible buffer layout).
+  // smstrikers-port: merged indices are u16 with 0xffff as the restart index.
   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-                        lastDraw->instanceCount == 1 && !lastDraw->nativeVertexFetch;
+                        lastDraw->instanceCount == 1 && !lastDraw->nativeVertexFetch &&
+                        lastDraw->vtxCount + vtxCount < 0xffffu;
 
   // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
   gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);

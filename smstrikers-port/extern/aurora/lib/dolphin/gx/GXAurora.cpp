@@ -34,6 +34,8 @@ void GXInsertDebugMarker(const char* label) {
 }
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
+  // smstrikers-port: the FIFO worker reads the policy.
+  aurora::gx::fifo::wait_idle();
   g_gxState.viewportPolicy = policy;
   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
 }

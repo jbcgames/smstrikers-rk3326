@@ -3,6 +3,7 @@
 #include "../internal.hpp"
 
 #include <cstring>
+#include <functional>
 
 namespace aurora::gx::fifo {
 
@@ -84,6 +85,22 @@ bool in_display_list();
 
 // Drain the internal FIFO buffer through the command processor
 void drain();
+
+// smstrikers-port: a worker processes each finished frame while the game runs the next, and GXDrawDone waits for
+// it as the console's waits for the GPU. AURORA_FIFO_THREAD=0 processes inline.
+bool threaded() noexcept;
+struct FrameBuffer {
+  uint8_t* data = nullptr;
+  uint32_t size = 0;
+  uint32_t capacity = 0;
+};
+// Game thread, worker idle: hands over this frame's commands and records the next frame into the spare buffer.
+FrameBuffer take_frame();
+// Worker: returns the processed buffer as the spare.
+void recycle_frame(const FrameBuffer& frame);
+void post_frame(std::function<void()> job);
+void wait_idle() noexcept;
+void stop_thread() noexcept;
 
 // Internal buffer inspection
 const uint8_t* get_buffer_data();

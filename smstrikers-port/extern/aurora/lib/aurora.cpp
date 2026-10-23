@@ -3,6 +3,7 @@
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
 #include "gfx/render_worker.hpp"
+#include "gx/command_processor.hpp"
 #include "gx/fifo.hpp"
 
 namespace aurora::gx {
@@ -168,6 +169,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
 void shutdown() noexcept {
 #ifdef AURORA_ENABLE_GX
+  gx::fifo::stop_thread();
   // gpu_synchronize (not render_worker::synchronize) so a worker parked on an EFB slot is released.
   gfx::gpu_synchronize();
 #ifdef AURORA_ENABLE_RMLUI
@@ -207,49 +209,18 @@ bool begin_frame() noexcept {
   }
 
   imgui::new_frame(window::get_window_size());
-  if (!gfx::begin_frame()) {
+  // smstrikers-port: the FIFO worker acquires the frame slot, since it records the frame.
+  if (!gx::fifo::threaded() && !gfx::begin_frame()) {
     return false;
   }
 #endif
   return true;
 }
 
-void end_frame() noexcept {
-  ZoneScoped;
 #ifdef AURORA_ENABLE_GX
-  auto t0 = std::chrono::steady_clock::now();
-  gx::fifo::drain();
-  auto t1 = std::chrono::steady_clock::now();
-  // After the drain so this frame's binds are stamped/current; before gfx::end_frame so
-  // any evicted textures land in this frame's deferred-destroy snapshot.
-  gx::expire_texture_object_caches();
-  gfx::finish();
-  auto t2 = std::chrono::steady_clock::now();
-  auto imguiDrawData = imgui::freeze();
-
-  const auto& presentSource = webgpu::present_source();
-  // Size the UI from the NATIVE present surface (window drawable), not surfaceConfiguration (the
-  // internalResolutionScale-downscaled EFB). Otherwise the UI would render at the game's internal
-  // resolution and get upscaled with the scene -- at 0.5x that made the UI huge and cramped. This
-  // is the same centered content rect composite_ui_overlay/present_frame blit into, so the UI
-  // target maps 1:1 and stays crisp and correctly-sized at any internal resolution scale.
-  const auto viewport = webgpu::calculate_present_viewport(webgpu::present_surface_width(),
-                                                           webgpu::present_surface_height(),
-                                                           presentSource.size.width, presentSource.size.height);
-
-  gl::Texture rmlTexture{};
-  gl::Sampler rmlSampler{};
-  bool rmlOverlay = false;
-#if AURORA_ENABLE_RMLUI
-  if (rmlui::is_initialized()) {
-    auto rmlFrame = rmlui::record_frame(viewport);
-    rmlTexture = rmlFrame.texture;
-    rmlSampler = rmlFrame.sampler;
-    rmlOverlay = rmlFrame.overlay;
-  }
-#endif
-
-  gfx::end_frame([rmlTexture, rmlSampler, rmlOverlay, imguiDrawData = std::move(imguiDrawData)]() {
+static gfx::EndFrameCallback present_callback(gl::Texture rmlTexture, gl::Sampler rmlSampler, bool rmlOverlay,
+                                             imgui::DrawData imguiDrawData) {
+  return [rmlTexture, rmlSampler, rmlOverlay, imguiDrawData = std::move(imguiDrawData)]() {
     // Runs on the render worker (which owns the GL context). Composite the finished scene, the
     // RmlUi overlay and the imgui overlay into the present target, then swap (desktop) or hand the
     // EFB slot to the main thread (device).
@@ -311,7 +282,61 @@ void end_frame() noexcept {
     TracyPlot("aurora: lastUniformSize", static_cast<int64_t>(gfx::g_stats.lastUniformSize));
     TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
-  });
+  };
+}
+#endif
+
+void end_frame() noexcept {
+  ZoneScoped;
+#ifdef AURORA_ENABLE_GX
+  if (gx::fifo::threaded()) {
+    // smstrikers-port: page flips are bound to this thread.
+    webgpu::sdl2shim_present::flush_present();
+    gx::fifo::wait_idle();
+    const auto frame = gx::fifo::take_frame();
+    gx::fifo::post_frame([frame, imguiDrawData = imgui::freeze()]() mutable {
+      gfx::begin_frame();
+      gx::fifo::process(frame.data, frame.size, true);
+      gx::fifo::recycle_frame(frame);
+      gx::expire_texture_object_caches();
+      gfx::finish();
+      gfx::end_frame(present_callback({}, {}, false, std::move(imguiDrawData)));
+    });
+    return;
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  gx::fifo::drain();
+  auto t1 = std::chrono::steady_clock::now();
+  // After the drain so this frame's binds are stamped/current; before gfx::end_frame so
+  // any evicted textures land in this frame's deferred-destroy snapshot.
+  gx::expire_texture_object_caches();
+  gfx::finish();
+  auto t2 = std::chrono::steady_clock::now();
+  auto imguiDrawData = imgui::freeze();
+
+  const auto& presentSource = webgpu::present_source();
+  // Size the UI from the NATIVE present surface (window drawable), not surfaceConfiguration (the
+  // internalResolutionScale-downscaled EFB). Otherwise the UI would render at the game's internal
+  // resolution and get upscaled with the scene -- at 0.5x that made the UI huge and cramped. This
+  // is the same centered content rect composite_ui_overlay/present_frame blit into, so the UI
+  // target maps 1:1 and stays crisp and correctly-sized at any internal resolution scale.
+  const auto viewport = webgpu::calculate_present_viewport(webgpu::present_surface_width(),
+                                                           webgpu::present_surface_height(),
+                                                           presentSource.size.width, presentSource.size.height);
+
+  gl::Texture rmlTexture{};
+  gl::Sampler rmlSampler{};
+  bool rmlOverlay = false;
+#if AURORA_ENABLE_RMLUI
+  if (rmlui::is_initialized()) {
+    auto rmlFrame = rmlui::record_frame(viewport);
+    rmlTexture = rmlFrame.texture;
+    rmlSampler = rmlFrame.sampler;
+    rmlOverlay = rmlFrame.overlay;
+  }
+#endif
+
+  gfx::end_frame(present_callback(rmlTexture, rmlSampler, rmlOverlay, std::move(imguiDrawData)));
 
   auto t3 = std::chrono::steady_clock::now();
   static int s_aurora_prof = 0;

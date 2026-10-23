@@ -14,12 +14,15 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <tracy/Tracy.hpp>
+#include <SDL3/SDL_cpuinfo.h>
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cfloat>
 #include <cmath>
 #include <mutex>
+#include <vector>
 #include <optional>
 #include <utility>
 
@@ -61,6 +64,7 @@ struct DynamicPaletteEntry {
 
 struct CachedTextureEntry {
   gfx::TextureHandle handle;
+  uint64_t bytes = 0; // smstrikers-port
   u32 texDataVersion = 0;
   u32 tlutObjId = 0;
   u32 tlutDataVersion = 0;
@@ -112,6 +116,52 @@ void clear_texture_dependency(u32 texObjId, u32 tlutObjId) {
   }
 }
 
+// smstrikers-port: the movie player mints a new GXTexObj every frame and the age sweep keeps each for 1800 frames,
+// 2.2 GB at 640x480 RGBA, so the cache also has a byte budget.
+uint64_t texture_cache_budget() noexcept {
+  static const uint64_t budget = [] {
+    const uint64_t ramMb = static_cast<uint64_t>(std::max(SDL_GetSystemRAM(), 0));
+    return std::clamp<uint64_t>(ramMb / 8, 96, 1024) << 20;
+  }();
+  return budget;
+}
+
+// smstrikers-port: entries bound or used this frame are never dropped, so the cache can stay over budget.
+void enforce_texture_cache_budget() noexcept {
+  uint64_t total = 0;
+  for (const auto& [_, entry] : s_textureObjectCaches) {
+    total += entry.bytes;
+  }
+  const uint64_t budget = texture_cache_budget();
+  if (total <= budget) {
+    return;
+  }
+  absl::flat_hash_set<u32> bound;
+  for (const auto& obj : g_gxState.loadedTextures) {
+    bound.insert(obj.texObjId);
+  }
+  for (const auto& bind : g_gxState.textures) {
+    bound.insert(bind.texObj.texObjId);
+  }
+  const u32 frame = gfx::current_frame();
+  std::vector<std::pair<u32, u32>> victims; // lastUsedFrame, texObjId
+  for (const auto& [id, entry] : s_textureObjectCaches) {
+    if (entry.lastUsedFrame != frame && !bound.contains(id)) {
+      victims.emplace_back(entry.lastUsedFrame, id);
+    }
+  }
+  std::sort(victims.begin(), victims.end());
+  for (const auto& [_, id] : victims) {
+    if (total <= budget / 4 * 3) {
+      break;
+    }
+    const auto it = s_textureObjectCaches.find(id);
+    total -= it->second.bytes;
+    clear_texture_dependency(id, it->second.tlutObjId);
+    s_textureObjectCaches.erase(it);
+  }
+}
+
 void store_cached_texture(const GXTexObj_& obj, gfx::TextureHandle handle, u32 tlutObjId = 0, u32 tlutDataVersion = 0) {
   if (obj.texObjId == 0) {
     return;
@@ -130,6 +180,17 @@ void store_cached_texture(const GXTexObj_& obj, gfx::TextureHandle handle, u32 t
 
   if (tlutObjId != 0) {
     s_tlutObjectCaches[tlutObjId].staticTextureUsers.insert(obj.texObjId);
+  }
+
+  // smstrikers-port: sized as RGBA8, plus a third for mips.
+  if (entry.handle) {
+    const auto& size = entry.handle->size;
+    entry.bytes = uint64_t{size.width} * size.height * 4 * (entry.handle->mipCount > 1 ? 4 : 3) / 3;
+  }
+  static u32 storesSinceCheck = 0;
+  if (++storesSinceCheck >= 8) {
+    storesSinceCheck = 0;
+    enforce_texture_cache_budget();
   }
 }
 

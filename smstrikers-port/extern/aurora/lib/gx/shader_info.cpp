@@ -198,8 +198,8 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     }
   }
 
-  // 10 position matrices + 10 texture matrices. Normal matrices are added below iff usesNormals.
-  info.uniformSize += sizeof(Mat3x4<float>) * 20;
+  // Position and texture matrices. Normal matrices are added below iff usesNormals.
+  info.uniformSize += sizeof(Mat3x4<float>) * (MaxPnMtx + MaxTexMtx);
   info.uniformSize += 16; // active PN matrix index + padding
 
   for (int i = 0; i < config.tevStageCount; ++i) {
@@ -266,6 +266,17 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
       info.sampledTexCoords.set(tcg.embossSrc);
       info.lightingEnabled = true;
+    }
+  }
+
+  // smstrikers-port: GX_TG_SRTG reads the lit channel, so compute it even when no TEV stage does.
+  for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
+    if (!info.sampledTexCoords.test(i)) {
+      continue;
+    }
+    const auto& tcg = config.tcgs[i];
+    if (tcg.type == GX_TG_SRTG && (tcg.src == GX_TG_COLOR0 || tcg.src == GX_TG_COLOR1)) {
+      info.sampledColorChannels.set(tcg.src == GX_TG_COLOR0 ? 0 : 1);
     }
   }
 
