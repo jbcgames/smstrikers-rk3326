@@ -2,6 +2,7 @@
 #include "Game/Debug/ShapeRender.h"
 #include "Game/Render/RenderShadow.h"
 #include "NL/gl/glMatrix.h"
+#include "NL/gl/glMemory.h" // PORT
 #include "NL/gl/glDraw3.h"
 #include "NL/gl/glState.h"
 #include "NL/gl/glAppAttach.h"
@@ -166,6 +167,28 @@ static inline void* FindStream(glModelPacket* pPacket, int streamID)
     return NULL;
 }
 
+// PORT: weak, so a build without Aurora's FIFO worker still links.
+extern "C" __attribute__((weak)) int aurora_gx_worker_active(void);
+
+// PORT: a frame-memory copy of one stream, so a frame the FIFO worker has yet to draw keeps its data.
+static void* FrameCopyStream(glModelPacket* pPacket, int streamID)
+{
+    glModelStream* streams = (glModelStream*)glFrameAlloc(pPacket->numStreams * sizeof(glModelStream), GLM_Header);
+    memcpy(streams, pPacket->streams, pPacket->numStreams * sizeof(glModelStream));
+    pPacket->streams = streams;
+    for (int i = 0; i < pPacket->numStreams; i++)
+    {
+        if (streams[i].id == streamID && streams[i].dataSize != 0)
+        {
+            void* copy = glFrameAlloc(streams[i].dataSize, GLM_VertexData);
+            memcpy(copy, (const void*)streams[i].address, streams[i].dataSize);
+            streams[i].address = (uintptr_t)copy;
+            return copy;
+        }
+    }
+    return FindStream(pPacket, streamID);
+}
+
 /**
  * Offset/Address/Size: 0x183C | 0x80121648 | size: 0x598
  */
@@ -183,7 +206,8 @@ static void Fresnelify(glModelPacket* pPacket, eGLView view)
     }
 
     s8* pNormals = (s8*)FindStream(pPacket, 1);
-    nlColour* pColours = (nlColour*)FindStream(pPacket, 2);
+    nlColour* pColours = (nlColour*)(aurora_gx_worker_active && aurora_gx_worker_active() ? FrameCopyStream(pPacket, 2) // PORT
+                                                                                         : FindStream(pPacket, 2));
 
     glViewGetViewMatrix(view, viewMat);
     glGetMatrix(pPacket->state.matrix, objectMat);

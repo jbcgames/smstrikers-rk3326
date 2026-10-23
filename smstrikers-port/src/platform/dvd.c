@@ -703,8 +703,14 @@ static s32 dvd_read(const DvdEntry* e, void* addr, s32 length, s32 offset)
     return got;
 }
 
+// Weak, so a build without Aurora's FIFO worker still links.
+__attribute__((weak)) void aurora_gx_wait_idle(void);
+
 static s32 pending_read_now(const DvdEntry* e, void* addr, s32 length, s32 offset)
 {
+    // The console's GPU has read a frame's textures before a later read lands; the FIFO worker may not have.
+    if (aurora_gx_wait_idle)
+        aurora_gx_wait_idle();
     const s32 got = dvd_read(e, addr, length, offset);
     if (probe_dvd())
         OSReport("[port] dvd: read %s off=%d len=%d -> %d\n", e->path,

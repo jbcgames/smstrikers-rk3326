@@ -2,8 +2,11 @@
 #include "command_processor.hpp"
 #include "../internal.hpp"
 
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -89,8 +92,105 @@ void drain() {
   detail::sBufferSize = 0;
 }
 
+namespace {
+std::thread s_worker;
+std::mutex s_mutex;
+std::condition_variable s_cv;
+std::function<void()> s_job;
+bool s_busy = false;
+bool s_stop = false;
+FrameBuffer s_spare;
+
+void worker_main() {
+  while (true) {
+    std::function<void()> job;
+    {
+      std::unique_lock lock{s_mutex};
+      s_cv.wait(lock, [] { return s_job != nullptr || s_stop; });
+      if (s_job == nullptr) {
+        break;
+      }
+      job = std::move(s_job);
+      s_job = nullptr;
+    }
+    job();
+    {
+      std::lock_guard lock{s_mutex};
+      s_busy = false;
+    }
+    s_cv.notify_all();
+  }
+}
+} // namespace
+
+bool threaded() noexcept {
+  static const bool on = [] {
+    const char* e = std::getenv("AURORA_FIFO_THREAD");
+    const bool v = e == nullptr || *e != '0';
+    if (v) {
+      Log.info("FIFO processing on its own thread");
+    }
+    return v;
+  }();
+  return on;
+}
+
+FrameBuffer take_frame() {
+  FrameBuffer frame{detail::sBufferData, detail::sBufferSize, detail::sBufferCapacity};
+  if (s_spare.data == nullptr) {
+    s_spare.capacity = detail::sBufferCapacity;
+    s_spare.data = static_cast<uint8_t*>(malloc(s_spare.capacity));
+  }
+  detail::sBufferData = s_spare.data;
+  detail::sBufferCapacity = s_spare.capacity;
+  detail::sBufferSize = 0;
+  s_spare = {};
+  return frame;
+}
+
+void recycle_frame(const FrameBuffer& frame) {
+  std::lock_guard lock{s_mutex};
+  s_spare = {frame.data, 0, frame.capacity};
+}
+
+void post_frame(std::function<void()> job) {
+  if (!s_worker.joinable()) {
+    s_worker = std::thread(worker_main);
+  }
+  {
+    std::lock_guard lock{s_mutex};
+    s_job = std::move(job);
+    s_busy = true;
+  }
+  s_cv.notify_all();
+}
+
+void wait_idle() noexcept {
+  if (!threaded()) {
+    return;
+  }
+  std::unique_lock lock{s_mutex};
+  s_cv.wait(lock, [] { return !s_busy; });
+}
+
+void stop_thread() noexcept {
+  if (!s_worker.joinable()) {
+    return;
+  }
+  wait_idle();
+  {
+    std::lock_guard lock{s_mutex};
+    s_stop = true;
+  }
+  s_cv.notify_all();
+  s_worker.join();
+}
+
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
 uint32_t get_buffer_size() { return detail::sBufferSize; }
 void clear_buffer() { detail::sBufferSize = 0; }
 
 } // namespace aurora::gx::fifo
+
+extern "C" void aurora_gx_wait_idle(void) { aurora::gx::fifo::wait_idle(); }
+extern "C" int aurora_gx_worker_active(void) { return aurora::gx::fifo::threaded() ? 1 : 0; }

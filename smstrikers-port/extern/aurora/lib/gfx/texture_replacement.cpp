@@ -1,6 +1,7 @@
 #include "texture_replacement.hpp"
 
 #include "../fs_helper.hpp"
+#include "../gx/fifo.hpp"
 #include "../gx/gx.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
@@ -1320,16 +1321,19 @@ std::string build_texture_replacement_name(const GXTexObj_& obj) noexcept {
 }
 } // namespace aurora::gfx::texture_replacement
 
+// smstrikers-port: the FIFO worker reads the registry and the texture caches.
 extern "C" uint32_t aurora_replacement_load(const char* root, int32_t priority, int one_pack) {
   (void)one_pack;
   if (!root || !*root) {
     return 0;
   }
+  aurora::gx::fifo::wait_idle();
   const auto group = aurora::texture::load_replacement_directory(std::filesystem::u8path(root), {.priority = priority});
   return static_cast<uint32_t>(group.registrations.size());
 }
 
 extern "C" void aurora_replacement_clear() {
+  aurora::gx::fifo::wait_idle();
   aurora::texture::clear_replacements();
 }
 

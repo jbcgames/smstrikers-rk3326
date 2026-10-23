@@ -347,6 +347,9 @@ struct FramePacket {
   ByteBuffer indices;
   ByteBuffer storage;
   ByteBuffer textureUpload;
+  // smstrikers-port: one block per upload, so growth never moves data the render worker is still reading.
+  std::deque<std::vector<uint8_t>> uploadBlocks;
+  size_t uploadBytes = 0;
   uint64_t frameId = 0;
   uint32_t frameIndex = 0;
   StagingHighWater copied;
@@ -375,6 +378,8 @@ struct FramePacket {
     indices.clear();
     storage.clear();
     textureUpload.clear();
+    uploadBlocks.clear();
+    uploadBytes = 0;
     verts.reserve_extra(VertexBufferSize);
     uniforms.reserve_extra(UniformBufferSize);
     indices.reserve_extra(IndexBufferSize);
@@ -578,7 +583,7 @@ static StagingHighWater current_high_water(const FramePacket& frame) noexcept {
       .uniforms = static_cast<uint32_t>(frame.uniforms.size()),
       .indices = static_cast<uint32_t>(frame.indices.size()),
       .storage = static_cast<uint32_t>(frame.storage.size()),
-      .textureUpload = static_cast<uint32_t>(frame.textureUpload.size()),
+      .textureUpload = static_cast<uint32_t>(frame.uploadBytes),
       .textureUploadCount = frame.textureUploads.size(),
   };
 }
@@ -658,10 +663,12 @@ void queue_texture_upload_data(const uint8_t* data, uint32_t bytesPerRow, uint32
   // the worker does glTexSubImage2D from that range at the op slot (Phase 2). No 256-byte
   // row alignment (that was a Dawn CopyBufferToTexture requirement) and no staging buffer.
   auto& frame = current_frame_packet();
-  const uint32_t offset = static_cast<uint32_t>(frame.textureUpload.size());
   const size_t byteCount = static_cast<size_t>(bytesPerRow) * rowsPerImage;
-  frame.textureUpload.append(data, byteCount);
-  queue_texture_upload(TextureUpload{tex, origin, size, level, bytesPerRow, Range{offset, static_cast<uint32_t>(byteCount)}});
+  const auto& block = frame.uploadBlocks.emplace_back(data, data + byteCount);
+  frame.uploadBytes += byteCount;
+  TextureUpload upload{tex, origin, size, level, bytesPerRow, Range{0, static_cast<uint32_t>(byteCount)}};
+  upload.data = block.data();
+  queue_texture_upload(std::move(upload));
 }
 
 void queue_texture_copy(TextureCopyView src, TextureCopyView dst, gl::Extent3D size, bool flipY) {
@@ -1438,6 +1445,13 @@ void shutdown() {
 static size_t acquire_frame_slot() {
   ZoneScopedN("Acquire frame slot");
   const auto waitStart = PresentClock::now();
+  // smstrikers-port: block rather than poll; GL has no events to pump.
+  if (render_worker::is_running() && !render_worker::is_worker_thread()) {
+    const size_t slot = g_frameSlots.acquire();
+    const double waitMs = std::chrono::duration<double, std::milli>{PresentClock::now() - waitStart}.count();
+    TracyPlot("aurora: frameSlotWaitMs", waitMs);
+    return slot;
+  }
   while (true) {
     if (const auto slot = g_frameSlots.try_acquire()) {
       const auto waitDuration = PresentClock::now() - waitStart;
@@ -1528,7 +1542,10 @@ void end_frame(EndFrameCallback callback) {
   // Dusklight (P4): present the frame the worker finished while we were decoding this one. Doing it
   // here rather than at the top of the frame is what preserves the overlap: by now the worker has
   // had our whole decode to run its Submit, so the wait below is usually near-zero.
-  webgpu::sdl2shim_present::flush_present();
+  // smstrikers-port: under the FIFO worker, the display thread flushes.
+  if (!gx::fifo::threaded()) {
+    webgpu::sdl2shim_present::flush_present();
+  }
   if (g_cpuFrameStart.time_since_epoch().count() != 0) {
     const auto cpuFrameTime = PresentClock::now() - g_cpuFrameStart;
     update_ema(g_cpuFrameTimeNs, duration_ns(cpuFrameTime));
@@ -1542,7 +1559,7 @@ void end_frame(EndFrameCallback callback) {
   frame.stats.lastUniformSize = frame.uniforms.size();
   frame.stats.lastIndexSize = frame.indices.size();
   frame.stats.lastStorageSize = frame.storage.size();
-  frame.stats.lastTextureUploadSize = frame.textureUpload.size();
+  frame.stats.lastTextureUploadSize = frame.uploadBytes;
 
   const size_t frameSlot = g_recordingFrameSlot;
   const uint64_t frameId = frame.frameId;
@@ -1662,8 +1679,9 @@ static void upload_op_data(FramePacket& frame, const FrameOp& op) {
   done.indices = std::max(done.indices, hw.indices);
 
   const size_t uploadStart = done.textureUploadCount;
-  for (size_t i = done.textureUploadCount; i < hw.textureUploadCount && i < frame.textureUploads.size(); ++i) {
-    const auto& up = frame.textureUploads[i];
+  // smstrikers-port: the op's own pointers, since the recording thread may be appending to the deque.
+  for (size_t i = done.textureUploadCount; i < hw.textureUploadCount && i < op.textureUploads.size(); ++i) {
+    const auto& up = *op.textureUploads[i];
     if (up.tex.id == 0) {
       continue;
     }

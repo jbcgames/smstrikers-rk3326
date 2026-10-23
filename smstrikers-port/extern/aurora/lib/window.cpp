@@ -1,6 +1,7 @@
 #include "window.hpp"
 
 #ifdef AURORA_ENABLE_GX
+#include "gx/fifo.hpp"
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
 #endif
@@ -98,6 +99,7 @@ void resize_swapchain() noexcept {
     SDL_SetRenderScale(g_renderer, size.scale, size.scale);
   }
 #ifdef AURORA_ENABLE_GX
+  gx::fifo::wait_idle();
   webgpu::resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height);
 #endif
 }

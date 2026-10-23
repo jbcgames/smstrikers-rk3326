@@ -265,6 +265,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
 }
 
 void GXDrawDone() {
+  aurora::gx::fifo::wait_idle();
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }
